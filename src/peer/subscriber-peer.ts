@@ -7,6 +7,12 @@ export class SubscriberPeer extends RtcPeer {
     console.debug("SubscriberPeer created.");
   }
 
+  /** LiveKit names a stream `<participantSid>|<trackSid>`, so a participant is one stream. */
+  protected override getStreamKey(event: RTCTrackEvent): string {
+    const [sid] = (event.streams[0]?.id ?? '').split('|');
+    return sid || super.getStreamKey(event);
+  }
+
   override async onDataChannelMessage(role: ChannelRole, event: MessageEvent): Promise<void> {
     let buffer: ArrayBuffer;
     if (event.data instanceof ArrayBuffer) {
