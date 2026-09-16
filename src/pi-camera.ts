@@ -224,29 +224,33 @@ export class PiCamera implements PiCameraApi, IpcSink {
     return { ...defaultOptions, ...userOptions };
   }
 
-  private getRtcConfig = (options: PiCameraOptions): RTCConfiguration => {
-    let config: RTCConfiguration = {};
-    config.iceServers = [];
-    config.iceCandidatePoolSize = 10;
+  /** An SFU hands over its own relay on connect, which replaces the STUN/TURN the options carried. */
+  private getRtcConfig = (options: PiCameraOptions, iceServers?: RTCIceServer[]): RtcPeerConfig => {
+    const servers: RTCIceServer[] = [];
+
     if (options.stunUrls && options.stunUrls.length > 0) {
-      config.iceServers.push({ urls: options.stunUrls });
+      servers.push({ urls: options.stunUrls });
     }
 
     if (options.turnUrls && options.turnUsername && options.turnPassword) {
-      config.iceServers.push({
+      servers.push({
         urls: options.turnUrls,
         username: options.turnUsername,
         credential: options.turnPassword,
       });
     }
-    return config;
+
+    return {
+      options,
+      iceServers: iceServers ?? servers,
+      iceCandidatePoolSize: 10,
+      bundlePolicy: 'max-bundle',
+      rtcpMuxPolicy: 'require',
+    };
   }
 
   private InitializeCmdPeer = async (conn: MqttClient) => {
-    this.cmdPeer = new CommanderPeer({
-      options: this.options,
-      ...this.getRtcConfig(this.options)
-    });
+    this.cmdPeer = new CommanderPeer(this.getRtcConfig(this.options));
 
     this.cmdPeer.onStream = (stream) => this.onStream?.(stream);
     this.cmdPeer.onSfuStream = (sid, stream) => this.onSfuStream?.(sid, stream);
@@ -293,8 +297,7 @@ export class PiCamera implements PiCameraApi, IpcSink {
     };
 
     conn.onJoin = async (server) => {
-      let config: RtcPeerConfig = { options: this.options };
-      config.iceServers = [server];
+      const config: RtcPeerConfig = this.getRtcConfig(this.options, [server]);
 
       this.pubPeer = new PublisherPeer(config);
       this.pubPeer.onDatachannel = (id) => this.onDatachannel?.(id);
@@ -357,12 +360,7 @@ export class PiCamera implements PiCameraApi, IpcSink {
     conn.onLeave = () => this.terminate();
 
     conn.onJoin = (iceServers) => {
-      const config: RtcPeerConfig = {
-        options: this.options,
-        iceServers: iceServers,
-        // Cloudflare puts every pulled track on one transport.
-        bundlePolicy: 'max-bundle',
-      };
+      const config: RtcPeerConfig = this.getRtcConfig(this.options, iceServers);
 
       this.cfPeer = new CloudflarePeer(config);
       this.cfPeer.onStream = (stream) => this.onStream?.(stream);
