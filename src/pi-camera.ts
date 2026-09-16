@@ -1,5 +1,4 @@
 import { MqttClient } from './signaling/mqtt-client';
-import { keepOnlyCodec } from './utils/rtc-tools';
 import { SignalingClient } from './signaling/signaling-client';
 import { PiCameraApi, PiCameraOptions } from './pi-camera.types';
 import { LiveKitClient, Participant, Quality, RoomInfo, Speaking } from './signaling/livekit-client';
@@ -268,12 +267,7 @@ export class PiCamera implements PiCameraApi, IpcSink {
     this.cmdPeer.onDatachannel = (id) => this.onDatachannel?.(id);
     this.cmdPeer.onMessage = (data) => this.onMessage?.(data);
     this.cmdPeer.onRecording = (res) => this.onRecording?.(res);
-    this.cmdPeer.onOffer = async (offer) => {
-      if (this.options.codec && offer.sdp) {
-        offer.sdp = keepOnlyCodec(offer.sdp, this.options.codec);
-      }
-      conn.send('offer', JSON.stringify(offer));
-    }
+    this.cmdPeer.onOffer = async (offer) => conn.send('offer', JSON.stringify(offer));
 
     conn.onIceCandidate = (ice) => this.cmdPeer?.addIceCandidate(ice);
     conn.onAnswer = (sdp) => this.cmdPeer?.setRemoteDescription(sdp);

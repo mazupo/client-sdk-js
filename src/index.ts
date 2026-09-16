@@ -7,6 +7,7 @@ import {
 import { ChannelRole, IpcMode, IpcSink, RequestType } from './peer/rtc-peer';
 import { PiCamera } from './pi-camera';
 import { PiCameraOptions, RNMediaStream, SignalingType } from './pi-camera.types';
+import { CodecType } from './utils/rtc-tools';
 import {
   LiveKitConnectionOptions,
   Participant,
@@ -38,4 +39,5 @@ export {
   FileEntry,
   QueryFileResponse,
   RNMediaStream,
+  CodecType,
 };

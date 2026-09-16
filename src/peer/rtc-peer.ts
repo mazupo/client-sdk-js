@@ -416,7 +416,58 @@ export class RtcPeer {
     }
   }
 
+  /** Apply codec preferences to every video transceiver before each description. */
+  protected prepareNegotiation(): void {
+    this.peer.getTransceivers()
+      .filter((transceiver) =>
+        transceiver.receiver.track?.kind === "video" && transceiver.currentDirection !== "stopped")
+      .forEach((transceiver) => this.preferCodec(transceiver));
+  }
+
+  private isCodec(entry: { mimeType: string }, name: string): boolean {
+    return entry.mimeType.split("/")[1]?.toUpperCase() === name.toUpperCase();
+  }
+
+  /** Restrict the video m-line to the selected codec before generating the description. */
+  private preferCodec(transceiver: RTCRtpTransceiver): void {
+    const codec = this.options.codec;
+    if (!codec) {
+      return;
+    }
+
+    const capabilities = RTCRtpReceiver.getCapabilities("video");
+    if (!capabilities) {
+      console.warn("Cannot read video capabilities; leaving the codec preference alone.");
+      return;
+    }
+
+    // Keep RTX, RED, and ULPFEC alongside the selected codec.
+    const wanted = capabilities.codecs.filter((entry) =>
+      this.isCodec(entry, codec) || this.isCodec(entry, "RTX")
+      || this.isCodec(entry, "RED") || this.isCodec(entry, "ULPFEC"));
+
+    if (!wanted.some((entry) => this.isCodec(entry, codec))) {
+      console.warn(`This browser cannot receive ${codec}; leaving the codec preference alone.`);
+      return;
+    }
+
+    // Don't select a codec the remote isn't sending.
+    const offered = transceiver.receiver.getParameters?.()?.codecs ?? [];
+    if (offered.length > 0 && !offered.some((entry) => this.isCodec(entry, codec))) {
+      console.debug(`The remote is not sending ${codec} here; leaving the codec preference alone.`);
+      return;
+    }
+
+    try {
+      transceiver.setCodecPreferences(wanted);
+    } catch (err) {
+      // Never let a codec preference take the whole negotiation down with it.
+      console.warn("Failed to set the codec preference:", err);
+    }
+  }
+
   createOffer = async (options?: RTCOfferOptions) => {
+    this.prepareNegotiation();
     const offer = await this.peer.createOffer(options);
     await this.peer.setLocalDescription(offer);
     console.debug("createOffer: ", offer);
@@ -425,6 +476,7 @@ export class RtcPeer {
 
   createAnswer = async (sd: RTCSessionDescriptionInit) => {
     await this.setRemoteDescription(sd);
+    this.prepareNegotiation();
     const answer = await this.peer.createAnswer();
     await this.peer.setLocalDescription(answer);
     console.debug("createAnswer: ", answer);
