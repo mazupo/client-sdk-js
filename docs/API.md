@@ -24,6 +24,7 @@
   * [connect](#connect)
   * [terminate](#terminate)
   * [getStatus](#getStatus)
+  * [getStats](#getStats)
   * [refresh](#refresh)
   * [fetchVideoList](#fetchVideoList)
   * [downloadVideoFile](#downloadVideoFile)
@@ -234,6 +235,12 @@ Available flags for initialization.
   
   Retrieves the current connection status.
 
+- ### getStats
+
+  `.getStats(selector?: MediaStreamTrack | null): Promise<RTCStatsReport> | undefined`
+
+  The browser's stats for the receiving peer, where `inbound-rtp` reports the jitter buffer, freezes and packet loss actually being seen. `undefined` before a peer exists.
+
 - ### refresh
 
   `.refresh(): Promise<number>`
@@ -324,6 +331,8 @@ Available flags for initialization.
   `.setJitterBufferTarget(target: number | null)`
 
   Milliseconds the receive jitter buffer should hold (`0`–`4000`, clamped). Lower means less delay but more freezes. `null` hands the decision back to the browser.
+
+  A hint: the browser converges on it gradually, so read the real delay from [getStats](#getStats). Needs Chrome 124, Firefox 115 or Safari 27.
 
 - ### getJitterBufferTarget
 

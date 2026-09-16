@@ -259,6 +259,10 @@ export class RtcPeer {
     return this.peer.connectionState;
   }
 
+  getStats(selector?: MediaStreamTrack | null): Promise<RTCStatsReport> {
+    return this.peer.getStats(selector);
+  }
+
   close() {
     for (const key of Object.keys(this.assemblers)) {
       this.assemblers[Number(key) as ChannelRole]?.reset();

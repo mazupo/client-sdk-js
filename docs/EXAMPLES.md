@@ -125,6 +125,28 @@ document.querySelector('#buffer').oninput = (event) => {
 };
 ```
 
+The browser converges on the target over several seconds, so `getStats()` is what says how much is really being held. `freezeCount` is the other half of the trade.
+
+```javascript
+let last = null;
+
+setInterval(async () => {
+  const report = await camera.getStats();
+
+  report?.forEach((stat) => {
+    if (stat.type !== 'inbound-rtp' || stat.kind !== 'video') {
+      return;
+    }
+    if (last && stat.jitterBufferEmittedCount > last.count) {
+      const ms = (stat.jitterBufferDelay - last.delay) /
+        (stat.jitterBufferEmittedCount - last.count) * 1000;
+      console.log(`buffered ${ms.toFixed(0)}ms, ${stat.freezeCount} freezes`);
+    }
+    last = { delay: stat.jitterBufferDelay, count: stat.jitterBufferEmittedCount };
+  });
+}, 2000);
+```
+
 ## Take a snapshot
 
 `datachannelOnly: true` skips the media stream entirely, so nothing is encoded or uploaded until the snapshot is asked for. The image arrives base64-encoded once every packet is in.

@@ -211,6 +211,14 @@ export interface PiCameraApi extends PiCameraEvents {
   getStatus(): RTCPeerConnectionState;
 
   /**
+   * The browser's `RTCStatsReport` for the receiving peer — where `inbound-rtp` reports the
+   * jitter buffer, freezes and packet loss actually being seen. `undefined` before a peer exists.
+   *
+   * @param selector - Limit the report to one track.
+   */
+  getStats(selector?: MediaStreamTrack | null): Promise<RTCStatsReport> | undefined;
+
+  /**
    * Pulls whatever the device has started publishing since the connection was established, and
    * resolves to how many tracks that was. Rejects if the SFU refuses.
    *

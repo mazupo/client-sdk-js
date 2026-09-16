@@ -128,6 +128,12 @@ export class PiCamera implements PiCameraApi, IpcSink {
     return peer ? peer.connectionState : 'new';
   }
 
+  // The receiving peer, so inbound-rtp is in the report. Undefined before there is one.
+  getStats = (selector?: MediaStreamTrack | null): Promise<RTCStatsReport> | undefined => {
+    const peer = this.cmdPeer ?? this.subPeer ?? this.cfPeer;
+    return peer?.getStats(selector);
+  }
+
   refresh = async (): Promise<number> => {
     if (this.client instanceof CloudflareClient) {
       return this.client.refresh();
