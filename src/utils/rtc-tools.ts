@@ -136,6 +136,30 @@ export const padZero = (num: number): string => {
   return num.toString().padStart(2, '0');
 }
 
+/** Past this the browser throws a RangeError, so a target is clamped before it gets there. */
+export const MAX_JITTER_BUFFER_TARGET_MS = 4000;
+
+/** `null` means "no application preference"; anything unusable becomes that rather than throwing. */
+export function clampJitterBufferTarget(target: number | null): number | null {
+  if (target === null) {
+    return null;
+  }
+
+  if (!Number.isFinite(target)) {
+    console.warn(`Ignoring a jitterBufferTarget of ${target}: not a finite number.`);
+    return null;
+  }
+
+  const clamped = Math.min(Math.max(target, 0), MAX_JITTER_BUFFER_TARGET_MS);
+  if (clamped !== target) {
+    console.warn(
+      `Clamped a jitterBufferTarget of ${target}ms to ${clamped}ms; ` +
+      `the allowed range is 0-${MAX_JITTER_BUFFER_TARGET_MS}ms.`
+    );
+  }
+  return clamped;
+}
+
 /**
  * A correlation id for a request, or a stream id for a chunked body. `crypto.randomUUID()` needs a
  * secure context and is missing from some React Native runtimes, hence the fallbacks.

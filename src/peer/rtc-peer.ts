@@ -1,7 +1,12 @@
 import { PiCameraOptions } from "../pi-camera.types";
 import { Packet, QueryFileResponse, RecordingResponse, Request } from "../proto/packet";
 import { StreamAssembler, StreamResult } from "../rtc/datachannel-receiver";
-import { arrayBufferToBase64, generateRequestId, yieldToEventLoop } from "../utils/rtc-tools";
+import {
+  arrayBufferToBase64,
+  clampJitterBufferTarget,
+  generateRequestId,
+  yieldToEventLoop
+} from "../utils/rtc-tools";
 
 export type ChannelLabel = 'command' | 'stream' | '_lossy' | '_reliable';
 
@@ -175,8 +180,16 @@ export class RtcPeer {
   private iceRestartTimer?: ReturnType<typeof setTimeout>;
   private negotiationReady = false;
 
+  /** `undefined` leaves the browser alone; `null` clears a preference already expressed. */
+  private jitterBufferTarget?: number | null;
+
   constructor(config: RtcPeerConfig) {
     this.options = config.options;
+
+    if (config.options.jitterBufferTarget !== undefined) {
+      this.jitterBufferTarget = clampJitterBufferTarget(config.options.jitterBufferTarget);
+    }
+
     this.peer = new RTCPeerConnection(config);
     this.peer.ontrack = (event) => this.handleTrack(event);
     this.peer.onicecandidate = (event) => {
@@ -450,6 +463,33 @@ export class RtcPeer {
     }
   }
 
+  /**
+   * How much media the receive jitter buffer should hold, in ms. A hint, not a setting: the
+   * browser clamps it to what it can provide and converges on it gradually. `null` hands the
+   * decision back to the browser.
+   */
+  setJitterBufferTarget = (target: number | null) => {
+    this.jitterBufferTarget = clampJitterBufferTarget(target);
+    this.peer.getReceivers().forEach((receiver) => this.applyJitterBufferTarget(receiver));
+  }
+
+  private applyJitterBufferTarget(receiver: RTCRtpReceiver): void {
+    if (this.jitterBufferTarget === undefined) {
+      return;
+    }
+
+    if (!('jitterBufferTarget' in receiver)) {
+      console.debug("jitterBufferTarget is not supported here; leaving the buffer alone.");
+      return;
+    }
+
+    try {
+      receiver.jitterBufferTarget = this.jitterBufferTarget;
+    } catch (err) {
+      console.warn("Failed to apply jitterBufferTarget:", err);
+    }
+  }
+
   toggleMic = (enabled: boolean = !this.options.isMicOn) => {
     this.options.isMicOn = enabled;
     this.toggleTrack(enabled, this.localStream);
@@ -524,6 +564,8 @@ export class RtcPeer {
   }
 
   private handleTrack = (event: RTCTrackEvent) => {
+    this.applyJitterBufferTarget(event.receiver);
+
     const sid = this.getStreamKey(event);
 
     let remoteStream = this.remoteStreamMap.get(sid);
