@@ -25,6 +25,13 @@
       <button onclick="start()">Start</button>
       <button onclick="stop()">Stop</button>
     </div>
+    <div>
+      <label>Jitter buffer target:
+        <input type="range" id="jitterBufferTarget" min="0" max="500" step="10" value="0"
+          oninput="setJitterBufferTarget(this.value)">
+        <span id="jitterBufferTargetValue">0</span> ms
+      </label>
+    </div>
 
     <hr>
 
@@ -86,6 +93,7 @@
         mqttUsername: mqttUsername,
         mqttPassword: mqttPassword,
         stunUrls: ["stun:stun1.l.google.com:19302", "stun:stun2.l.google.com:19302"],
+        jitterBufferTarget: Number(document.getElementById('jitterBufferTarget').value),
       });
       conn.onStream = (stream) => {
         videoRef.srcObject = stream;
@@ -96,6 +104,14 @@
     window.stop = function stop() {
       if (conn) {
         conn.terminate();
+      }
+    };
+
+    window.setJitterBufferTarget = function setJitterBufferTarget(value) {
+      const target = Number(value);
+      document.getElementById('jitterBufferTargetValue').textContent = target;
+      if (conn) {
+        conn.setJitterBufferTarget(target);
       }
     };
 

@@ -54,6 +54,12 @@ export interface PiCameraOptions
   isMicOn?: boolean;
   isSpeakerOn?: boolean;
   codec?: CodecType;
+
+  /**
+   * How much media the receive jitter buffer should hold, in milliseconds (`0`-`4000`).
+   * Lower means less playout delay but less room to ride out jitter and recover lost packets.
+   */
+  jitterBufferTarget?: number | null;
 }
 
 export type ActionType = LiveKitActionType | MqttTopicType | CloudflareActionType;
@@ -290,4 +296,18 @@ export interface PiCameraApi extends PiCameraEvents {
    * @param enabled
    */
   toggleSpeaker(enabled?: boolean): void;
+
+  /**
+   * Retunes the receive jitter buffer on a live connection. Same meaning and range as the
+   * `jitterBufferTarget` option.
+   *
+   * @param target - Milliseconds of buffering to aim for, or `null` to let the browser decide.
+   */
+  setJitterBufferTarget(target: number | null): void;
+
+  /**
+   * The target last asked for, not the one the browser settled on. `undefined` means none has
+   * been asked for.
+   */
+  getJitterBufferTarget(): number | null | undefined;
 }

@@ -199,6 +199,18 @@ export class PiCamera implements PiCameraApi, IpcSink {
     this.subPeer?.toggleSpeaker(enabled);
   }
 
+  // The publisher has no receivers
+  setJitterBufferTarget = (target: number | null) => {
+    this.options.jitterBufferTarget = target;
+    this.cmdPeer?.setJitterBufferTarget(target);
+    this.subPeer?.setJitterBufferTarget(target);
+    this.cfPeer?.setJitterBufferTarget(target);
+  }
+
+  getJitterBufferTarget = (): number | null | undefined => {
+    return this.options.jitterBufferTarget;
+  }
+
   private initializeOptions(userOptions: PiCameraOptions): PiCameraOptions {
     const defaultOptions = {
       signaling: 'mqtt',
