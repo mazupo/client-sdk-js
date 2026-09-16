@@ -2,6 +2,7 @@
 
 - [Live video in a browser](#live-video-in-a-browser)
 - [Live video in React Native](#live-video-in-react-native)
+- [Trade buffering for latency](#trade-buffering-for-latency)
 - [Take a snapshot](#take-a-snapshot)
 - [Send and receive IPC messages](#send-and-receive-ipc-messages)
 - [Drive a device with a gamepad](#drive-a-device-with-a-gamepad)
@@ -92,6 +93,36 @@ export default function App() {
 
   return <RTCView streamURL={streamUrl} style={{ flex: 1 }} />;
 }
+```
+
+## Trade buffering for latency
+
+The browser buffers a few hundred milliseconds before playing, which is wasted on a LAN. `jitterBufferTarget` says how much to aim for: lower means less delay but more freezes.
+
+```javascript
+import { PiCamera } from '@mazupo/client';
+
+const camera = new PiCamera({
+  uid: 'your-custom-uid',
+  mqttHost: 'your.mqtt.cloud',
+  mqttPath: '/mqtt',
+  mqttPort: 8884,
+  mqttUsername: 'hakunamatata',
+  mqttPassword: 'Wonderful',
+  stunUrls: ['stun:stun1.l.google.com:19302'],
+  jitterBufferTarget: 10,
+});
+
+camera.onStream = (stream) => {
+  document.querySelector('#videoElement').srcObject = stream;
+};
+
+camera.connect();
+
+// Back off once the network turns out to be worse than hoped.
+document.querySelector('#buffer').oninput = (event) => {
+  camera.setJitterBufferTarget(Number(event.target.value));
+};
 ```
 
 ## Take a snapshot
