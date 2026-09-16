@@ -36,6 +36,8 @@
   * [canSend](#canSend)
   * [toggleMic](#toggleMic)
   * [toggleSpeaker](#toggleSpeaker)
+  * [setJitterBufferTarget](#setJitterBufferTarget)
+  * [getJitterBufferTarget](#getJitterBufferTarget)
 * [Gamepad](#gamepad)
   * [The device has to be listening](#the-device-has-to-be-listening)
   * [Exports](#exports)
@@ -101,7 +103,8 @@ Available flags for initialization.
 | datachannelOnly | `boolean`  | `false` | Specifies that the connection is only for data transfer, without media streams. |
 | isMicOn         | `boolean`  | `true`  | Enables the local microphone stream by default if the connection is established. |
 | isSpeakerOn     | `boolean`  | `true`  | Enables the remote audio stream by default if the connection is established. |
-| codec           | `string`   |         | Codecs include `H264`, `VP8`, `VP9`, and `AV1`.              |
+| codec           | `string`   |         | Codecs include `H264`, `VP8`, `VP9`, and `AV1`. Ignored where the device is not sending that codec. |
+| jitterBufferTarget | `number` |         | Milliseconds of media the receive jitter buffer should hold (`0`–`4000`). See [setJitterBufferTarget](#setJitterBufferTarget). |
 
 ## Events
 - ### onConnectionState
@@ -133,6 +136,8 @@ Available flags for initialization.
   `= (sid: string, stream: MediaStream) => {}`
 
   Triggered only when a media stream is received from the SFU, delivering both the participant's server-side ID (sid) and the associated MediaStream. On the `cloudflare` path there are no participants, so the first argument is the name of the track that was pulled.
+
+  On the `mqtt` path the audio track and the first camera share one stream, so the sid is whichever arrived first. To tell cameras apart, read `track.id` — the device names them `video_track_<alias>`.
 
 - ### onSnapshot
 
@@ -313,6 +318,18 @@ Available flags for initialization.
   `.toggleSpeaker(enabled?: boolean)`
 
   Toggles the **remote** audio stream on or off. If an argument is provided, it will force the state to the specified value, otherwise, the current state will be toggled.
+
+- ### setJitterBufferTarget
+
+  `.setJitterBufferTarget(target: number | null)`
+
+  Milliseconds the receive jitter buffer should hold (`0`–`4000`, clamped). Lower means less delay but more freezes. `null` hands the decision back to the browser.
+
+- ### getJitterBufferTarget
+
+  `.getJitterBufferTarget(): number | null | undefined`
+
+  The target last asked for, not the one the browser settled on. `undefined` means none has been asked for.
 
 ## Gamepad
 
