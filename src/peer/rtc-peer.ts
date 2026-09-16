@@ -517,16 +517,10 @@ export class RtcPeer {
   }
 
   /**
-   * Which remote stream a track belongs to. LiveKit puts the participant sid in the stream id; an
-   * SFU that hands tracks over ungrouped has to say so some other way.
+   * Which remote stream a track belongs to. Each backend groups tracks its own way.
    */
   protected getStreamKey(event: RTCTrackEvent): string {
-    const streamId = event.streams[0]?.id;
-    if (streamId) {
-      const [sid] = streamId.split('|');
-      return sid;
-    }
-    return event.transceiver.mid ?? event.track.id;
+    return event.streams[0]?.id ?? event.transceiver.mid ?? event.track.id;
   }
 
   private handleTrack = (event: RTCTrackEvent) => {
@@ -542,8 +536,14 @@ export class RtcPeer {
     // A track can arrive ungrouped, in which case it is the whole payload.
     const tracks = event.streams[0] ? event.streams[0].getTracks() : [event.track];
 
-    tracks.forEach((track) => {
-      remoteStream?.addTrack(track);
+    // Only announce newly added tracks.
+    const added = tracks.filter((track) => !remoteStream!.getTrackById(track.id));
+    if (added.length === 0) {
+      return;
+    }
+
+    added.forEach((track) => {
+      remoteStream!.addTrack(track);
       if (track.kind === "audio") {
         track.enabled = this.options.isSpeakerOn ?? false;
       }

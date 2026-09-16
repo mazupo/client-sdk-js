@@ -50,6 +50,8 @@ function drained(channel: RTCDataChannel): Promise<void> {
 }
 
 export class CommanderPeer extends RtcPeer {
+  private primaryKey?: string;
+  private firstCameraClaimed = false;
 
   constructor(config: RtcPeerConfig) {
     super(config);
@@ -71,7 +73,23 @@ export class CommanderPeer extends RtcPeer {
     console.debug("CommanderPeer is created.");
   }
 
+  protected override getStreamKey(event: RTCTrackEvent): string {
+    const streamId = super.getStreamKey(event);
+
+    if (event.track.kind === 'audio') {
+      return this.primaryKey ??= streamId;
+    }
+    if (!this.firstCameraClaimed) {
+      this.firstCameraClaimed = true;
+      return this.primaryKey ??= streamId;
+    }
+    return streamId;
+  }
+
   close = () => {
+    this.primaryKey = undefined;
+    this.firstCameraClaimed = false;
+
     if (this.isChannelOpen(ChannelRole.Command)) {
       const packet = Packet.create({
         requestId: generateRequestId(),
