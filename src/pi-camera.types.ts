@@ -53,6 +53,11 @@ export interface PiCameraOptions
   datachannelOnly?: boolean;
   isMicOn?: boolean;
   isSpeakerOn?: boolean;
+
+  /**
+   * Video codec requested from the device. Only used with `mqtt`.
+   * With `livekit` or `cloudflare`, the SFU forwards the device's negotiated codec.
+   */
   codec?: CodecType;
 
   /**

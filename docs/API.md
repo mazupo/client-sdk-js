@@ -104,7 +104,7 @@ Available flags for initialization.
 | datachannelOnly | `boolean`  | `false` | Specifies that the connection is only for data transfer, without media streams. |
 | isMicOn         | `boolean`  | `true`  | Enables the local microphone stream by default if the connection is established. |
 | isSpeakerOn     | `boolean`  | `true`  | Enables the remote audio stream by default if the connection is established. |
-| codec           | `string`   |         | Codecs include `H264`, `VP8`, `VP9`, and `AV1`. Ignored where the device is not sending that codec. |
+| codec           | `string`   |         | Codecs include `H264`, `VP8`, `VP9`, and `AV1`. Only used with `mqtt`; ignored with `livekit` and `cloudflare`, where the SFU forwards the device's published codec. |
 | jitterBufferTarget | `number` |         | Milliseconds of media the receive jitter buffer should hold (`0`–`4000`). See [setJitterBufferTarget](#setJitterBufferTarget). |
 
 ## Events
