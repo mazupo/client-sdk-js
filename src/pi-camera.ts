@@ -227,7 +227,14 @@ export class PiCamera implements PiCameraApi, IpcSink {
       isSpeakerOn: true,
     } as PiCameraOptions;
 
-    return { ...defaultOptions, ...userOptions };
+    const options = { ...defaultOptions, ...userOptions };
+
+    if (options.codec && options.signaling !== 'mqtt') {
+      console.warn(`The codec option only applies to mqtt; ignoring ${options.codec} on ${options.signaling}.`);
+      options.codec = undefined;
+    }
+
+    return options;
   }
 
   /** An SFU hands over its own relay on connect, which replaces the STUN/TURN the options carried. */
