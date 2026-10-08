@@ -61,6 +61,16 @@ export interface PiCameraOptions
   codec?: CodecType;
 
   /**
+   * The most video bitrate the device may send to this viewer, in kbps. Only used with `mqtt`,
+   * where each viewer has its own connection and encoder on the device. The device lowers the
+   * resolution first to stay under it, and keeps the frame rate.
+   *
+   * Set when connecting; to change it, connect again. With `livekit` or `cloudflare` every
+   * viewer shares one stream, whose cap is the device's own `--max-bitrate`.
+   */
+  maxBitrate?: number;
+
+  /**
    * How much media the receive jitter buffer should hold, in milliseconds (`0`-`4000`).
    * Lower means less playout delay but less room to ride out jitter and recover lost packets.
    */

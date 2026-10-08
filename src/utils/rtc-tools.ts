@@ -67,6 +67,49 @@ export const padZero = (num: number): string => {
   return num.toString().padStart(2, '0');
 }
 
+/**
+ * Caps the video the other side sends at `kbps`, with the `b=AS` (RFC 4566) and `b=TIAS`
+ * (RFC 3890) lines of every video section. Lines like these already in a video section are
+ * replaced; other sections are left alone.
+ *
+ * The lines limit what the *other* side sends, so only the description sent to it needs them —
+ * the one applied locally can stay as the browser made it.
+ */
+export function withMaxBitrate(sdp: string, kbps: number): string {
+  const lines = sdp.split('\r\n');
+  const out: string[] = [];
+  const bandwidth = [`b=AS:${Math.round(kbps)}`, `b=TIAS:${Math.round(kbps * 1000)}`];
+  let video = false;
+  let pending = false;
+
+  for (const line of lines) {
+    if (line.startsWith('m=')) {
+      if (pending) out.push(...bandwidth);
+      video = line.startsWith('m=video');
+      pending = video;
+      out.push(line);
+      continue;
+    }
+    if (video && (line.startsWith('b=AS:') || line.startsWith('b=TIAS:'))) {
+      continue;
+    }
+    // b= lines follow the section's c= line; without one, they go before its first attribute.
+    if (pending && (line.startsWith('c=') || line.startsWith('a=') || line === '')) {
+      if (line.startsWith('c=')) {
+        out.push(line, ...bandwidth);
+      } else {
+        out.push(...bandwidth, line);
+      }
+      pending = false;
+      continue;
+    }
+    out.push(line);
+  }
+  if (pending) out.push(...bandwidth);
+
+  return out.join('\r\n');
+}
+
 /** Past this the browser throws a RangeError, so a target is clamped before it gets there. */
 export const MAX_JITTER_BUFFER_TARGET_MS = 4000;
 

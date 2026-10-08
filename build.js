@@ -17,6 +17,7 @@ const tests = [
   { in: 'test/ipc-body.test.ts', out: '.test-build/ipc-body.cjs' },
   { in: 'test/gamepad.test.ts', out: '.test-build/gamepad.cjs' },
   { in: 'test/gamepad-react.test.tsx', out: '.test-build/gamepad-react.cjs' },
+  { in: 'test/max-bitrate.test.ts', out: '.test-build/max-bitrate.cjs' },
 ];
 
 async function run() {
