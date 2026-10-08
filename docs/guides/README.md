@@ -3,6 +3,7 @@
 Short, complete examples for each task. Every example connects over MQTT unless it says otherwise. `uid` must match the `--uid` of the device, and the MQTT settings are for the broker that the device uses.
 
 - [Latency](latency.md): trade buffering for a lower delay.
+- [Bandwidth](bandwidth.md): cap the bitrate that the device sends to this viewer.
 - [Snapshots](snapshots.md): take a still image, without a video stream.
 - [Recording](recording.md): start and stop the device's recorder, and download a file.
 - [Camera controls](camera-controls.md): change brightness, contrast and other image controls.
