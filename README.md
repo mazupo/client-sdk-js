@@ -100,24 +100,27 @@ export default function App() {
 }
 ```
 
-## Contents
+## Documentation
 
-- [Migrating from 2.x](MIGRATION.md) — renamed exports, the new wire protocol, and what it means for your device
-- [API Documentation](docs/API.md) — options, events, methods
+📚 **[Full documentation](https://mazupo.com/docs/client-sdk-js)**, also readable in [docs/](docs/README.md).
+
+- [Getting Started](docs/getting-started/README.md): the first video, on the web or in React Native.
+- [Guides](docs/guides/README.md): one complete example for each task.
+- [API Reference](docs/reference/README.md): options, events, methods, DataChannels and the gamepad.
+- [Migrating from 2.x](docs/migrating-from-2x.md): renamed exports, the new wire protocol, and what it means for your device.
 
 ## Examples
 
-- [Live video in a browser](docs/EXAMPLES.md#live-video-in-a-browser) — the full HTML page behind the Quick Start above.
-- [Live video in React Native](docs/EXAMPLES.md#live-video-in-react-native) — `RTCView` with `registerGlobals()`.
-- [Take a snapshot](docs/EXAMPLES.md#take-a-snapshot) — a still image over the command DataChannel, no video stream.
-- [Send and receive IPC messages](docs/EXAMPLES.md#send-and-receive-ipc-messages) — talk to a process on the device.
-- [Drive a device with a gamepad](docs/EXAMPLES.md#drive-a-device-with-a-gamepad) — read a controller and send each reading to the device.
-- [Gamepad in React](docs/EXAMPLES.md#gamepad-in-react) — `useGamepad` and the `<GamepadView>` overlay.
-- [Download a recorded video](docs/EXAMPLES.md#download-a-recorded-video) — list recordings and pull one down.
-- [Adjust camera controls](docs/EXAMPLES.md#adjust-camera-controls) — brightness, contrast, and the rest of `CameraControlId`.
-- [Start and stop recording](docs/EXAMPLES.md#start-and-stop-recording) — drive the device's on-demand recorder.
-- [Play through the LiveKit SFU](docs/EXAMPLES.md#play-through-the-livekit-sfu) — many viewers, one uplink.
-- [Pull from the Cloudflare Realtime SFU](docs/EXAMPLES.md#pull-from-the-cloudflare-realtime-sfu) — same, with nothing to host.
+- [Live video in a browser](docs/getting-started/web.md): the full HTML page behind the Quick Start above.
+- [Live video in React Native](docs/getting-started/react-native.md): `RTCView` with `registerGlobals()`.
+- [Trade buffering for latency](docs/guides/latency.md): `jitterBufferTarget` and how to measure it.
+- [Take a snapshot](docs/guides/snapshots.md): a still image over the command DataChannel, with no video stream.
+- [Send and receive IPC messages](docs/guides/ipc-messages.md): talk to a process on the device.
+- [Drive a device with a gamepad](docs/guides/gamepad.md): read a controller and send each reading to the device, in JavaScript or React.
+- [Start and stop recording, and download a file](docs/guides/recording.md): drive the device's on-demand recorder.
+- [Adjust camera controls](docs/guides/camera-controls.md): brightness, contrast, and the rest of `CameraControlId`.
+- [Play through the LiveKit SFU](docs/guides/livekit.md): many viewers, one uplink.
+- [Pull from the Cloudflare Realtime SFU](docs/guides/cloudflare.md): the same, with nothing to host.
 
 # License
 
