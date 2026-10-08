@@ -13,6 +13,7 @@ import { DEFAULT } from './constants';
 import { QueryFileResponse, RecordingResponse, VideoMode } from './proto/packet';
 import { CameraControlId } from './proto/camera_control';
 import { CameraControlValue } from './constants/camera-property';
+import { withMaxBitrate } from './utils/rtc-tools';
 
 export class PiCamera implements PiCameraApi, IpcSink {
   onConnectionState?: (state: RTCPeerConnectionState) => void;
@@ -234,7 +235,32 @@ export class PiCamera implements PiCameraApi, IpcSink {
       options.codec = undefined;
     }
 
+    if (options.maxBitrate !== undefined) {
+      if (options.signaling !== 'mqtt') {
+        console.warn(
+          `The maxBitrate option only applies to mqtt; ignoring it on ${options.signaling}. ` +
+          `Set --max-bitrate on the device instead.`
+        );
+        options.maxBitrate = undefined;
+      } else if (!Number.isFinite(options.maxBitrate) || options.maxBitrate <= 0) {
+        console.warn(`Ignoring a maxBitrate of ${options.maxBitrate}: it has to be a positive number of kbps.`);
+        options.maxBitrate = undefined;
+      }
+    }
+
     return options;
+  }
+
+  /**
+   * The description to send the device, with `maxBitrate` written into it. Applied to answers
+   * too: a device that renegotiates would otherwise read an uncapped answer and lift the cap.
+   */
+  private capBitrate(description: RTCSessionDescriptionInit): RTCSessionDescriptionInit {
+    const kbps = this.options.maxBitrate;
+    if (!kbps || !description.sdp) {
+      return description;
+    }
+    return { ...description, sdp: withMaxBitrate(description.sdp, kbps) };
   }
 
   /** An SFU hands over its own relay on connect, which replaces the STUN/TURN the options carried. */
@@ -284,14 +310,14 @@ export class PiCamera implements PiCameraApi, IpcSink {
     this.cmdPeer.onDatachannel = (id) => this.onDatachannel?.(id);
     this.cmdPeer.onMessage = (data) => this.onMessage?.(data);
     this.cmdPeer.onRecording = (res) => this.onRecording?.(res);
-    this.cmdPeer.onOffer = async (offer) => conn.send('offer', JSON.stringify(offer));
+    this.cmdPeer.onOffer = async (offer) => conn.send('offer', JSON.stringify(this.capBitrate(offer)));
 
     conn.onIceCandidate = (ice) => this.cmdPeer?.addIceCandidate(ice);
     conn.onAnswer = (sdp) => this.cmdPeer?.setRemoteDescription(sdp);
     conn.onOffer = async (sdp) => {
       const answer = await this.cmdPeer?.createAnswer(sdp);
       if (answer) {
-        conn.send('answer', JSON.stringify(answer));
+        conn.send('answer', JSON.stringify(this.capBitrate(answer)));
       }
     };
     conn.onError = (err) => this.onError?.(err);

@@ -15,7 +15,7 @@
   },
   "scripts": {
     "build": "node build.js && tsc",
-    "test": "node build.js --test && node .test-build/ipc-body.cjs && node .test-build/gamepad.cjs && node .test-build/gamepad-react.cjs",
+    "test": "node build.js --test && node .test-build/ipc-body.cjs && node .test-build/gamepad.cjs && node .test-build/gamepad-react.cjs && node .test-build/max-bitrate.cjs",
     "proto:generate": "mkdirp src/proto && protoc -I ./external/protocol/protos --ts_proto_out=src/proto --ts_proto_opt=esModuleInterop=true,outputJsonMethods=false,env=browser ./external/protocol/protos/*.proto",
     "proto:clean": "rimraf src/proto",
     "proto:build": "npm run proto:clean && npm run proto:generate"
