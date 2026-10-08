@@ -114,6 +114,7 @@ export default function App() {
 - [Live video in a browser](docs/getting-started/web.md): the full HTML page behind the Quick Start above.
 - [Live video in React Native](docs/getting-started/react-native.md): `RTCView` with `registerGlobals()`.
 - [Trade buffering for latency](docs/guides/latency.md): `jitterBufferTarget` and how to measure it.
+- [Cap the bitrate](docs/guides/bandwidth.md): `maxBitrate` for small tiles and metered links.
 - [Take a snapshot](docs/guides/snapshots.md): a still image over the command DataChannel, with no video stream.
 - [Send and receive IPC messages](docs/guides/ipc-messages.md): talk to a process on the device.
 - [Drive a device with a gamepad](docs/guides/gamepad.md): read a controller and send each reading to the device, in JavaScript or React.

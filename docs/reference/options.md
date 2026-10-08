@@ -27,4 +27,5 @@ The options of `new PiCamera(options)`.
 | isMicOn         | `boolean`  | `true`  | Turn on the local microphone when the connection is up.      |
 | isSpeakerOn     | `boolean`  | `true`  | Play the remote audio when the connection is up.             |
 | codec           | `string`   |         | `H264`, `VP8`, `VP9` or `AV1`. Only used with `mqtt`. With `livekit` and `cloudflare`, the SFU forwards the codec that the device published. |
+| maxBitrate | `number` |         | The most video bitrate the device may send to this viewer, in kbps. Only used with `mqtt`. See [Bandwidth](../guides/bandwidth.md). |
 | jitterBufferTarget | `number` |         | How many milliseconds of media the receive buffer should hold (`0` to `4000`). See [setJitterBufferTarget](methods.md#setjitterbuffertarget). |
