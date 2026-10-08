@@ -158,7 +158,7 @@ const pad = attachGamepad(camera);
 ```
 
 React is an optional peer dependency, needed only for the `/gamepad/react` entry point.
-See the [API documentation](docs/API.md) for the rest.
+See the [API reference](reference/README.md) for the rest.
 
 ## License
 
