@@ -8,7 +8,7 @@ The options of `new PiCamera(options)`.
 | uid             | `string`   |         | The `--uid` of the device. Used by `mqtt` and `cloudflare`. |
 | mqttHost        | `string`   |         | The MQTT broker host.                                        |
 | mqttPath        | `string`   | `/mqtt` | The MQTT broker path.                                        |
-| mqttPort        | `number`   | `8884`  | The WebSocket port of the MQTT broker.                       |
+| mqttPort        | `number`   |         | The WebSocket port of the MQTT broker, such as `8084` on EMQX Serverless. |
 | mqttProtocol    | `string`   | `wss`   | The protocol for the MQTT broker.                            |
 | mqttUsername    | `string`   |         | The username for the MQTT broker.                            |
 | mqttPassword    | `string`   |         | The password for the MQTT broker.                            |
