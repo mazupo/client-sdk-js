@@ -10,5 +10,5 @@ Install the SDK and show live video from a pi-webrtc device.
 The device must run pi-webrtc with MQTT. See [MQTT in the pi-webrtc docs](https://mazupo.com/docs/pi-webrtc/signaling/mqtt). You need:
 
 - The `--uid` that the device was started with.
-- The MQTT broker host, and its **WebSocket** port. On HiveMQ Cloud, this is `8884`.
+- The MQTT broker host, and its **WebSocket** port and path. On EMQX Serverless, these are `8084` and `/mqtt`.
 - The broker username and password.

@@ -29,7 +29,7 @@ export default function App() {
       uid: 'your-custom-uid',
       mqttHost: 'your.mqtt.cloud',
       mqttPath: '/mqtt',
-      mqttPort: 8884,
+      mqttPort: 8084,
       mqttUsername: 'hakunamatata',
       mqttPassword: 'Wonderful',
       stunUrls: ['stun:stun1.l.google.com:19302'],
