@@ -18,6 +18,7 @@ const tests = [
   { in: 'test/gamepad.test.ts', out: '.test-build/gamepad.cjs' },
   { in: 'test/gamepad-react.test.tsx', out: '.test-build/gamepad-react.cjs' },
   { in: 'test/max-bitrate.test.ts', out: '.test-build/max-bitrate.cjs' },
+  { in: 'test/cloudflare-room.test.ts', out: '.test-build/cloudflare-room.cjs' },
 ];
 
 async function run() {
