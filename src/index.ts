@@ -14,7 +14,17 @@ import {
   Quality,
   Speaking
 } from './signaling/livekit-client';
-import { DeviceSession, ApiConnectionOptions } from './signaling/picamera-api';
+import { CloudflareRoom } from './cloudflare/room';
+import {
+  CloudflareRoomOptions,
+  DeviceStateName,
+  RoomControl,
+  RoomDevice,
+  RoomError,
+  RoomStatus,
+  RoomViewer,
+  RoomViewerInfo,
+} from './cloudflare/types';
 import { FileEntry, QueryFileResponse, VideoMode } from './proto/packet';
 
 export {
@@ -25,8 +35,15 @@ export {
   Participant,
   Quality,
   Speaking,
-  ApiConnectionOptions,
-  DeviceSession,
+  CloudflareRoom,
+  CloudflareRoomOptions,
+  DeviceStateName,
+  RoomControl,
+  RoomDevice,
+  RoomError,
+  RoomStatus,
+  RoomViewer,
+  RoomViewerInfo,
   CameraControlId,
   CameraControlValue,
   ChannelRole,

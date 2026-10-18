@@ -8,9 +8,8 @@ export interface LiveKitConnectionOptions {
   livekitUrl?: string;
 
   /**
-   * Matches pi-webrtc's `--livekit-key`. Issued by LiveKit, and not the same thing as the
-   * `apiKey` of the picamera device API — the relay compares this one against its own
-   * LIVEKIT_API_KEY before it mints an access token.
+   * Matches pi-webrtc's `--livekit-key`. Issued by LiveKit; the relay compares it against its
+   * own LIVEKIT_API_KEY before it mints an access token.
    */
   livekitKey?: string;
 

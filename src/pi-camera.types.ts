@@ -8,8 +8,6 @@ import {
   RoomInfo,
   Speaking,
 } from './signaling/livekit-client';
-import { CloudflareActionType } from './signaling/cloudflare-client';
-import { DeviceSession, ApiConnectionOptions } from './signaling/picamera-api';
 import { ChannelRole, IpcMode, RequestType } from './peer/rtc-peer';
 import { QueryFileResponse, RecordingResponse, VideoMode } from './proto/packet';
 import { CameraControlId } from './proto/camera_control';
@@ -26,22 +24,20 @@ export interface RNMediaStream extends MediaStream {
 
 /**
  * Which backend the device is reachable through. Named for the backend rather than for the
- * transport, matching pi-webrtc's `--use-mqtt` / `--use-livekit` / `--use-cloudflare`; both SFU
- * options in fact reach their backend through the same picamera device API.
+ * transport, matching pi-webrtc's `--use-mqtt` / `--use-livekit`. To watch devices through a
+ * cf-sfu-worker (`--use-cloudflare`), use `CloudflareRoom`.
  */
-export type SignalingType = 'mqtt' | 'livekit' | 'cloudflare';
+export type SignalingType = 'mqtt' | 'livekit';
 
 export interface PiCameraOptions
-  extends MqttConnectionOptions, LiveKitConnectionOptions, ApiConnectionOptions {
+  extends MqttConnectionOptions, LiveKitConnectionOptions {
   signaling?: SignalingType;
 
   /**
    * The uid pi-webrtc was started with (its `--uid` flag) — the device's own id, not a browser
    * or session id.
    *
-   * mqtt:       prefixes the signaling topics the device subscribes to.
-   * cloudflare: looked up through `GET /devices/{uid}` to find which SFU session the device is
-   *             currently publishing into.
+   * mqtt: prefixes the signaling topics the device subscribes to.
    */
   uid?: string;
 
@@ -56,7 +52,7 @@ export interface PiCameraOptions
 
   /**
    * Video codec requested from the device. Only used with `mqtt`.
-   * With `livekit` or `cloudflare`, the SFU forwards the device's negotiated codec.
+   * With `livekit`, the SFU forwards the device's negotiated codec.
    */
   codec?: CodecType;
 
@@ -65,8 +61,8 @@ export interface PiCameraOptions
    * where each viewer has its own connection and encoder on the device. The device lowers the
    * resolution first to stay under it, and keeps the frame rate.
    *
-   * Set when connecting; to change it, connect again. With `livekit` or `cloudflare` every
-   * viewer shares one stream, whose cap is the device's own `--max-bitrate`.
+   * Set when connecting; to change it, connect again. With `livekit` every viewer shares one
+   * stream, whose cap is the device's own `--max-bitrate`.
    */
   maxBitrate?: number;
 
@@ -77,7 +73,7 @@ export interface PiCameraOptions
   jitterBufferTarget?: number | null;
 }
 
-export type ActionType = LiveKitActionType | MqttTopicType | CloudflareActionType;
+export type ActionType = LiveKitActionType | MqttTopicType;
 
 export interface PiCameraEvents {
   /**
@@ -161,22 +157,12 @@ export interface PiCameraEvents {
   onTimeout?: () => void;
 
   /**
-   * Emitted when signaling fails for a reason worth putting in front of a user — a device that
-   * has never reported a session, one that is registered but not publishing, a track the SFU
-   * refused. Distinct from `onTimeout`, which only says the peer never came up.
+   * Emitted when signaling fails for a reason worth putting in front of a user. Distinct from
+   * `onTimeout`, which only says the peer never came up.
    *
    * @param err - What went wrong.
    */
   onError?: (err: Error) => void;
-
-  /**
-   * Emitted on the `cloudflare` path once the device's session record has been read, before the
-   * peer is built. Cloudflare mints a new session id on every device reconnect, so this is the
-   * only place the current one is visible.
-   *
-   * @param session - What the device last reported it is publishing into.
-   */
-  onDeviceSession?: (session: DeviceSession) => void;
 
   /**
    * Emitted when the SFU room information changes.
@@ -232,15 +218,6 @@ export interface PiCameraApi extends PiCameraEvents {
    * @param selector - Limit the report to one track.
    */
   getStats(selector?: MediaStreamTrack | null): Promise<RTCStatsReport> | undefined;
-
-  /**
-   * Pulls whatever the device has started publishing since the connection was established, and
-   * resolves to how many tracks that was. Rejects if the SFU refuses.
-   *
-   * Only the `cloudflare` path has anything to re-read; elsewhere new tracks arrive on their own
-   * and this resolves to `0`.
-   */
-  refresh(): Promise<number>;
 
   /**
   * Retrieves the list of video files.
