@@ -107,6 +107,7 @@ export default function App() {
 - [Getting Started](docs/getting-started/README.md): the first video, on the web or in React Native.
 - [Guides](docs/guides/README.md): one complete example for each task.
 - [API Reference](docs/reference/README.md): options, events, methods, DataChannels and the gamepad.
+- [Migrating from 3.x](docs/migrating-from-3x.md): Cloudflare Realtime moved to `CloudflareRoom`.
 - [Migrating from 2.x](docs/migrating-from-2x.md): renamed exports, the new wire protocol, and what it means for your device.
 
 ## Examples
@@ -121,7 +122,7 @@ export default function App() {
 - [Start and stop recording, and download a file](docs/guides/recording.md): drive the device's on-demand recorder.
 - [Adjust camera controls](docs/guides/camera-controls.md): brightness, contrast, and the rest of `CameraControlId`.
 - [Play through the LiveKit SFU](docs/guides/livekit.md): many viewers, one uplink.
-- [Pull from the Cloudflare Realtime SFU](docs/guides/cloudflare.md): the same, with nothing to host.
+- [Watch a room through Cloudflare Realtime](docs/guides/cloudflare.md): every device in a room, with nothing to host, and control one of them.
 
 # License
 

@@ -26,12 +26,6 @@ Returns the current connection status.
 
 The browser's stats for the receiving connection. `inbound-rtp` shows the jitter buffer, the freezes and the packet loss. Returns `undefined` before a connection exists.
 
-## refresh
-
-`.refresh(): Promise<number>`
-
-Pulls in the tracks that the device started to publish after the connection was made, and resolves to how many there were. Rejects if the SFU refuses. Only the `cloudflare` path needs it. On the other paths, new tracks arrive on their own, and it resolves to `0`.
-
 ## fetchVideoList
 
 `.fetchVideoList(options?: { param?: string | Date, mode?: VideoMode })`

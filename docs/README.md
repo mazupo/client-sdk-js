@@ -7,6 +7,7 @@
 - [Getting Started](getting-started/README.md): install the SDK and show the first video.
 - [Guides](guides/README.md): snapshots, recording, IPC messages, gamepads, SFUs and more.
 - [API Reference](reference/README.md): every option, event and method.
+- [Migrating from 3.x](migrating-from-3x.md): Cloudflare moved to `CloudflareRoom`.
 - [Migrating from 2.x](migrating-from-2x.md): renamed exports and the new wire protocol.
 
 ## Signaling
@@ -17,6 +18,7 @@ The `signaling` option selects how the SDK reaches the device:
 | --- | --- | --- |
 | `mqtt` (default) | An MQTT broker | Peer-to-peer video, audio both ways, and every DataChannel |
 | `livekit` | A LiveKit SFU | Many viewers. Only the IPC channels. |
-| `cloudflare` | Cloudflare Realtime, through the device API | Many viewers. No DataChannels. |
+
+To watch through Cloudflare Realtime, use `CloudflareRoom` instead of `PiCamera`. It shows every device in a room, and one viewer at a time can control each device. See [Cloudflare Realtime](guides/cloudflare.md).
 
 The device must run pi-webrtc 3.x. A 2.x device does not understand a 3.x client. See [Migrating from 2.x](migrating-from-2x.md).

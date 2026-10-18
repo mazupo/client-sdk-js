@@ -54,25 +54,21 @@
 
     <hr>
 
+    <div id="cfTiles"></div>
     <div>
-      <video id="cfVideoElement" controls autoplay playsinline>
-        Your browser doesn't support HTML5 video.
-      </video>
+      <label>API url: <input type="text" id="apiUrl" placeholder="cf-sfu-worker API URL"
+          value="https://api.mazupo.com/cloudflare"></label><br>
+      <label>Viewer key: <input type="text" id="apiKey" placeholder="Viewer public key" value="VIEWER_PUBLIC_KEY"></label><br>
+      <label>Room: <input type="text" id="cfRoom" placeholder="Room"></label><br>
     </div>
     <div>
-      <label>API url: <input type="text" id="apiUrl" placeholder="Device API URL"
-          value="https://api.mazupo.com"></label><br>
-      <label>API key: <input type="text" id="apiKey" placeholder="Viewer API Key" value="ec0478c67e729b6f429eda1e97829af0"></label><br>
-      <label>Device UID: <input type="text" id="cfUid" placeholder="Device UID"></label><br>
-    </div>
-    <div>
-      <button onclick="pull()">Pull</button>
-      <button onclick="drop()">Drop</button>
+      <button onclick="joinRoom()">Join room</button>
+      <button onclick="leaveRoom()">Leave room</button>
     </div>
   </div>
 
   <script type="module">
-    import { PiCamera } from 'https://cdn.jsdelivr.net/npm/@mazupo/client@3/dist/index.esm.js';
+    import { CloudflareRoom, PiCamera } from 'https://cdn.jsdelivr.net/npm/@mazupo/client@4/dist/index.esm.js';
 
     let videoRef = document.getElementById('videoElement');
     let conn = null;
@@ -147,34 +143,40 @@
     // ===============
     // Cloudflare demo
     // ===============
-    let cfVideoRef = document.getElementById('cfVideoElement');
-    let cfConn = null;
+    let cfTiles = document.getElementById('cfTiles');
+    let cfRoom = null;
 
-    window.pull = function pull() {
-      const apiUrl = document.getElementById('apiUrl').value;
-      const apiKey = document.getElementById('apiKey').value;
-      const uid = document.getElementById('cfUid').value;
-
-      cfConn = new PiCamera({
-        signaling: 'cloudflare',
-        apiUrl: apiUrl,
-        apiKey: apiKey,
-        uid: uid
+    window.joinRoom = function joinRoom() {
+      cfRoom = new CloudflareRoom({
+        apiUrl: document.getElementById('apiUrl').value,
+        apiKey: document.getElementById('apiKey').value,
+        roomId: document.getElementById('cfRoom').value,
       });
-      cfConn.onSfuStream = (trackName, stream) => {
-        console.log(`pulled ${trackName}`);
-        cfVideoRef.srcObject = stream;
+      // One video for each device in the room.
+      cfRoom.onDevices = (devices) => {
+        for (const device of devices) {
+          let video = document.getElementById(`cf-${device.deviceId}`);
+          if (!video) {
+            video = Object.assign(document.createElement('video'), {
+              id: `cf-${device.deviceId}`, autoplay: true, playsInline: true, muted: true, controls: true,
+            });
+            cfTiles.append(video);
+          }
+          if (video.srcObject !== (device.stream ?? null)) {
+            video.srcObject = device.stream ?? null;
+          }
+          video.title = `${device.deviceId}: ${device.state}`;
+        }
       };
-      cfConn.onError = (err) => {
-        console.error(err.message);
+      cfRoom.onError = (err) => {
+        console.error(err.code, err.message);
       };
-      cfConn.connect();
+      cfRoom.connect();
     };
 
-    window.drop = function drop() {
-      if (cfConn) {
-        cfConn.terminate();
-      }
+    window.leaveRoom = function leaveRoom() {
+      cfRoom?.leave();
+      cfTiles.replaceChildren();
     };
   </script>
 </body>

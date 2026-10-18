@@ -39,7 +39,7 @@ The scene was mostly still. A busy scene drops to a lower resolution sooner.
 
 ## Limits
 
-- It works with `mqtt` only. There, each viewer has its own connection and encoder on the device. With `livekit` or `cloudflare`, all viewers share one stream: set `--max-bitrate` on the device instead.
+- It works with `mqtt` only. There, each viewer has its own connection and encoder on the device. With `livekit` or `CloudflareRoom`, all viewers share one stream: set `--max-bitrate` on the device instead.
 - You set it when you connect. To change it, call `terminate()`, and connect again with the new value.
 - The device's own `--max-bitrate` still applies. The lower of the two wins.
 
