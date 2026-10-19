@@ -23,16 +23,47 @@ export interface TokenResponse {
   url: string;
 }
 
+/** How long a token request may take before it counts as failed. */
+export const TOKEN_TIMEOUT_MS = 10_000;
+
+/** A token request the worker refused. `status` is 0 when it got no answer. */
+export class TokenError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = 'TokenError';
+  }
+
+  /** Asking again cannot help: a wrong key, a bad body or a forbidden room. */
+  get permanent(): boolean {
+    return this.status === 400 || this.status === 401 || this.status === 403;
+  }
+}
+
 /** Trades the viewer public key for an access token. */
 export async function requestToken(apiUrl: string, apiKey: string, body: TokenBody): Promise<TokenResponse> {
-  const response = await fetch(`${apiUrl.replace(/\/+$/, '')}/token`, {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TOKEN_TIMEOUT_MS);
+  let response: Response;
+  try {
+    response = await fetch(`${apiUrl.replace(/\/+$/, '')}/token`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    throw new TokenError(
+      controller.signal.aborted
+        ? `The token request got no answer within ${TOKEN_TIMEOUT_MS / 1000} s.`
+        : `The token request failed: ${error instanceof Error ? error.message : String(error)}`,
+      0,
+    );
+  } finally {
+    clearTimeout(timer);
+  }
   const json = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(json?.error?.message ?? `The token request failed (${response.status}).`);
+    throw new TokenError(json?.error?.message ?? `The token request failed (${response.status}).`, response.status);
   }
   if (typeof json?.token !== 'string' || typeof json?.url !== 'string') {
     throw new Error('The token response has no token or url.');

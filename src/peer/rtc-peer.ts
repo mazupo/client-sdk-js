@@ -106,12 +106,6 @@ export interface IpcOptions {
   sequence?: number;
 }
 
-/** A destination for encoded IPC payloads. */
-export interface IpcSink {
-  sendToEndpoint(data: Uint8Array, mode?: IpcMode, options?: IpcOptions): void;
-  canSend?(mode?: IpcMode): boolean;
-}
-
 /** `Ipc` carries an endpoint; without options this is `raw`, which reaches the default socket. */
 export function ipcBody(binary: Uint8Array, options?: IpcOptions) {
   return options

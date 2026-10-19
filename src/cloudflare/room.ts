@@ -15,13 +15,14 @@ import {
   ViewerRef,
 } from '../proto/cloudflare';
 import { Packet } from '../proto/packet';
+import { SfuRoom } from '../connection/sfu-room';
 import { CloudflarePeer } from '../peer/cloudflare-peer';
-import { ChannelRole, IpcMode, IpcOptions, IpcSink, roleInit } from '../peer/rtc-peer';
+import { ChannelRole, IpcMode, IpcOptions, roleInit, RtcPeer } from '../peer/rtc-peer';
 import { IpcReceiver } from '../rtc/ipc-receiver';
 import { sendIpc } from '../rtc/ipc-sender';
-import { clampJitterBufferTarget, generateRequestId } from '../utils/rtc-tools';
 import {
   ResponseFrame,
+  TokenError,
   errorName,
   openSocket,
   parseResponse,
@@ -33,8 +34,6 @@ import {
   CloudflareRoomOptions,
   RoomControl,
   RoomDevice,
-  RoomError,
-  RoomStatus,
   RoomViewer,
   RoomViewerInfo,
 } from './types';
@@ -104,24 +103,15 @@ function rtcIceServer(server: IceServer): RTCIceServer {
  *
  * With `ipc`, each live device's `_lossy` and `_reliable` channels open too: messages from the
  * device arrive on `onMessage`, and the viewer in control of a device can send to it. Only one
- * viewer controls a device at a time; others wait in line.
+ * viewer controls a device at a time; others wait in line. `sendText()` goes to every device this
+ * viewer controls, `sendTextTo()` to one.
+ *
+ * After a dropped connection it reconnects on its own until `disconnect()`.
  */
-export class CloudflareRoom {
-  /** The devices in the room. Called with the whole list after every change. */
-  onDevices?: (devices: RoomDevice[]) => void;
-  /** Who is in the room, this viewer included. Called with the whole list after every change. */
-  onViewers?: (viewers: RoomViewerInfo[]) => void;
-  /** An IPC message from a device. Needs `ipc`. */
-  onMessage?: (deviceId: string, data: Uint8Array) => void;
-  onStatus?: (status: RoomStatus) => void;
-  onError?: (error: RoomError) => void;
-
-  readonly roomId: string;
-  readonly viewerId: string;
+export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
   private readonly apiUrl: string;
   private readonly apiKey: string;
   private readonly ipc: boolean;
-  private jitterBufferTarget?: number | null;
 
   /** The one socket in use. Events from any older socket are ignored. */
   private socket: WebSocket | null = null;
@@ -134,7 +124,6 @@ export class CloudflareRoom {
   private iceServers: RTCIceServer[] = [];
   private leaving = true;
   private attempt = 0;
-  private status: RoomStatus = 'closed';
   /** Who this viewer is in the room, once joined. */
   private me: ViewerRef | null = null;
   /** Frames are handled one at a time, in order. */
@@ -168,17 +157,13 @@ export class CloudflareRoom {
   private emitQueued = false;
 
   constructor(options: CloudflareRoomOptions) {
-    if (!options.apiUrl || !options.apiKey || !options.roomId) {
-      throw new Error('CloudflareRoom needs apiUrl, apiKey and roomId.');
+    super(options, { timeout: 0, isMicOn: false });
+    if (!options.apiUrl || !options.apiKey) {
+      throw new Error('CloudflareRoom needs apiUrl and apiKey.');
     }
     this.apiUrl = options.apiUrl;
     this.apiKey = options.apiKey;
-    this.roomId = options.roomId;
-    this.viewerId = options.viewerId?.trim() || generateRequestId();
     this.ipc = options.ipc ?? false;
-    if (options.jitterBufferTarget !== undefined) {
-      this.jitterBufferTarget = clampJitterBufferTarget(options.jitterBufferTarget);
-    }
   }
 
   /** The devices in the room, as `onDevices` last reported them. */
@@ -196,25 +181,16 @@ export class CloudflareRoom {
     }));
   }
 
-  /** Joins the room. After a dropped connection it reconnects on its own until `leave()`. */
-  connect = () => {
-    if (!this.leaving) {
-      console.warn('CloudflareRoom is already connected, ignoring the duplicated connect().');
-      return;
-    }
+  /** Joins the room. */
+  protected open(): void {
     this.attempt = 0;
     globalThis.addEventListener?.('pagehide', this.onPageHide);
-    this.setStatus('connecting');
     void this.join();
   }
 
   /** Leaves the room, so the device can sleep if nobody else watches. */
-  leave = () => {
-    if (this.leaving && !this.socket && this.status === 'closed') {
-      return;
-    }
+  protected close(): void {
     this.shutDown(true);
-    this.setStatus('closed');
   }
 
   /**
@@ -241,8 +217,36 @@ export class CloudflareRoom {
     sendRequest(this.socket, 'releaseControl', { deviceId });
   }
 
+  /** Sends to the devices this viewer controls, or only to `deviceIds`. */
+  protected deliver(data: Uint8Array, mode: IpcMode, options?: IpcOptions, deviceIds?: string[]): boolean {
+    const targets = this.targets(mode, deviceIds);
+    if (targets.length === 0) {
+      if (deviceIds) {
+        console.warn(`Cannot send to ${deviceIds.join(', ')}: this viewer does not control it, or its channel is not open.`);
+      }
+      return false;
+    }
+    for (const deviceId of targets) {
+      sendIpc(this.dataSubs.get(deviceId)?.channels.get(`_${mode}`), data, mode, options);
+    }
+    return true;
+  }
+
+  protected deliverable(mode: IpcMode, deviceIds?: string[]): boolean {
+    return this.targets(mode, deviceIds).length > 0;
+  }
+
+  protected peers(): RtcPeer[] {
+    return this.peer ? [this.peer] : [];
+  }
+
+  /** The devices a message would reach: those this viewer controls, with the channel open. */
+  private targets(mode: IpcMode, deviceIds?: string[]): string[] {
+    return (deviceIds ?? [...this.dataSubs.keys()]).filter((deviceId) => this.controls(deviceId, mode));
+  }
+
   /** Whether a message sent to the device right now would reach it. */
-  canSend = (deviceId: string, mode: IpcMode = 'reliable'): boolean => {
+  private controls(deviceId: string, mode: IpcMode): boolean {
     const data = this.dataSubs.get(deviceId);
     const info = this.infos.get(deviceId);
     return Boolean(
@@ -252,59 +256,8 @@ export class CloudflareRoom {
     );
   }
 
-  /** Sends text to the device's IPC socket. False if this viewer cannot send to it now. */
-  sendText = (deviceId: string, text: string, mode: IpcMode = 'reliable'): boolean => {
-    return this.sendData(deviceId, new TextEncoder().encode(text), mode);
-  }
-
-  /** Sends bytes to the device's IPC socket. False if this viewer cannot send to it now. */
-  sendData = (deviceId: string, data: Uint8Array, mode: IpcMode = 'reliable'): boolean => {
-    return this.sendToEndpoint(deviceId, data, mode);
-  }
-
-  /** @internal Addressed send, for whatever encodes for a named endpoint. */
-  sendToEndpoint = (deviceId: string, data: Uint8Array, mode: IpcMode = 'reliable', options?: IpcOptions): boolean => {
-    if (!this.canSend(deviceId, mode)) {
-      console.warn(`Cannot send to ${deviceId}: this viewer does not control it, or its channel is not open.`);
-      return false;
-    }
-    sendIpc(this.dataSubs.get(deviceId)?.channels.get(`_${mode}`), data, mode, options);
-    return true;
-  }
-
-  /** One device as an IpcSink, e.g. for `attachGamepad`. */
-  ipcSink = (deviceId: string): IpcSink => ({
-    sendToEndpoint: (data, mode, options) => {
-      this.sendToEndpoint(deviceId, data, mode, options);
-    },
-    canSend: (mode) => this.canSend(deviceId, mode),
-  });
-
-  /** The browser's stats for the room's PeerConnection. Undefined before there is one. */
-  getStats = (selector?: MediaStreamTrack | null): Promise<RTCStatsReport> | undefined => {
-    return this.peer?.getStats(selector);
-  }
-
-  /** Same as PiCamera's: retunes the jitter buffer of every track received. */
-  setJitterBufferTarget = (target: number | null) => {
-    this.jitterBufferTarget = clampJitterBufferTarget(target);
-    this.peer?.setJitterBufferTarget(target);
-  }
-
-  getJitterBufferTarget = (): number | null | undefined => {
-    return this.jitterBufferTarget;
-  }
-
   private onPageHide = () => {
     sendRequest(this.socket, 'leave');
-  }
-
-  private setStatus(status: RoomStatus) {
-    if (this.status === status) {
-      return;
-    }
-    this.status = status;
-    this.onStatus?.(status);
   }
 
   private setViewers(viewers: ViewerInfo[]) {
@@ -313,10 +266,6 @@ export class CloudflareRoom {
     }
     this.viewerInfos = viewers;
     this.onViewers?.(this.viewers);
-  }
-
-  private emitError(error: RoomError) {
-    this.onError?.(error);
   }
 
   /** Reports the device list once, after the current burst of changes. */
@@ -369,7 +318,13 @@ export class CloudflareRoom {
       if (seq !== this.connectSeq) {
         return;
       }
-      this.emitError({ code: 'token', message: error instanceof Error ? error.message : String(error) });
+      const message = error instanceof Error ? error.message : String(error);
+      if (error instanceof TokenError && error.permanent) {
+        // A wrong key or a refused request: asking again gets the same answer.
+        this.fail({ code: 'token', message });
+        return;
+      }
+      this.emitError({ code: 'token', message });
       this.scheduleReconnect();
     }
   }
@@ -419,7 +374,7 @@ export class CloudflareRoom {
     if (event.code === CloseCode.CLOSE_CODE_REPLACED) {
       this.shutDown(false);
       this.emitError({ code: 'replaced', message: 'Another connection joined the room with this viewer id.' });
-      this.setStatus('closed');
+      this.closed();
       return;
     }
     this.scheduleReconnect();
@@ -461,7 +416,7 @@ export class CloudflareRoom {
         }
         this.setViewers(message.viewers);
         this.busy = false;
-        this.setStatus('joined');
+        this.setStatus('connected');
         this.changed();
         this.sync();
         break;
@@ -838,7 +793,7 @@ export class CloudflareRoom {
   /** A device's channel, negotiated on the id the worker gave. */
   private openChannel(deviceId: string, label: string, id: number, owner: DataChannels): RTCDataChannel {
     const channel = this.peer!.openChannel(label, id, CHANNEL_INIT[label]);
-    const receiver = new IpcReceiver((body) => this.onMessage?.(deviceId, body));
+    const receiver = new IpcReceiver((body) => this.onMessage?.(body, deviceId));
     owner.receivers.push(receiver);
     channel.addEventListener('message', (event) => {
       try {
@@ -907,7 +862,7 @@ export class CloudflareRoom {
     const peer = new CloudflarePeer({
       iceServers: this.iceServers,
       bundlePolicy: 'max-bundle',
-      options: { isSpeakerOn: true, jitterBufferTarget: this.jitterBufferTarget },
+      options: this.peerOptions(),
     });
     this.peer = peer;
     peer.onTrack = () => {
@@ -953,7 +908,9 @@ export class CloudflareRoom {
       }
       changed = true;
       if (tracks.length > 0) {
-        this.streams.set(deviceId, new MediaStream(tracks));
+        const stream = new MediaStream(tracks);
+        this.streams.set(deviceId, stream);
+        this.onStream?.(stream, deviceId);
       } else {
         this.streams.delete(deviceId);
       }
@@ -987,7 +944,7 @@ export class CloudflareRoom {
       ...(error ? { error } : {}),
       ipc: info.dataChannels,
       control,
-      canSend: this.canSend(info.deviceId),
+      canSend: this.controls(info.deviceId, 'reliable'),
     };
   }
 }

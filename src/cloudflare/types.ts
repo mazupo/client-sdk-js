@@ -1,4 +1,10 @@
-export interface CloudflareRoomOptions {
+import type { SfuRoomOptions } from '../connection/types';
+
+/**
+ * `viewerId`: connecting again with the same id within 30 s resumes the subscriptions, e.g. after
+ * a page reload. `timeout` is `0` by default: the room keeps trying until `disconnect()`.
+ */
+export interface CloudflareRoomOptions extends SfuRoomOptions {
   /**
    * The worker's API URL, e.g. `https://api.mazupo.com/cloudflare`. The access token comes from
    * `POST {apiUrl}/token`.
@@ -8,26 +14,11 @@ export interface CloudflareRoomOptions {
   /** The worker's viewer public key. */
   apiKey: string;
 
-  /** The room to watch. */
-  roomId: string;
-
-  /**
-   * Who this viewer is in the room. A random UUID by default. Connecting again with the same id
-   * within 30 s resumes the subscriptions, e.g. after a page reload.
-   */
-  viewerId?: string;
-
   /**
    * Open each live device's `_lossy` and `_reliable` channels: receive its IPC messages, and take
    * control of it to send. Fixed for the connection.
    */
   ipc?: boolean;
-
-  /**
-   * How much media the receive jitter buffer should hold, in milliseconds (`0`-`4000`).
-   * Lower means less playout delay but less room to ride out jitter and recover lost packets.
-   */
-  jitterBufferTarget?: number | null;
 }
 
 export type DeviceStateName = 'offline' | 'sleeping' | 'waking' | 'live' | 'unknown';
@@ -88,23 +79,4 @@ export interface RoomDevice {
   control: RoomControl;
   /** This viewer controls the device and its `_reliable` channel is open. */
   canSend: boolean;
-}
-
-/**
- * - `connecting`: getting a token and joining.
- * - `joined`: in the room.
- * - `reconnecting`: the socket dropped; trying again.
- * - `closed`: after `leave()`, or when another connection took this viewer id.
- */
-export type RoomStatus = 'connecting' | 'joined' | 'reconnecting' | 'closed';
-
-export interface RoomError {
-  /**
-   * The worker's error code in lower case, e.g. `not_controller`. The SDK adds `token` (the token
-   * request failed) and `replaced` (another connection joined with this viewer id).
-   */
-  code: string;
-  message: string;
-  /** The device the error is about, if any. */
-  deviceId?: string;
 }

@@ -4,11 +4,13 @@
 // however many pads arrive, no unguarded index reads, and a rate that does not depend on
 // the display or on the tab being in front.
 
-import { attachGamepad } from '../src/gamepad/attach';
+import { Connection } from '../src/connection/connection';
+import { SfuRoom, SfuRoomDevice, SfuRoomViewer } from '../src/connection/sfu-room';
+import { IpcMode, IpcOptions, RtcPeer } from '../src/peer/rtc-peer';
 import { GamepadSampler } from '../src/gamepad/sampler';
 import { Button, isPressed, sameSnapshot, toSnapshot } from '../src/gamepad/snapshot';
 import { InputReport } from '../src/proto/input';
-import { GamepadSnapshot, IpcSink } from '../src/gamepad/types';
+import { GamepadSnapshot } from '../src/gamepad/types';
 
 let failures = 0;
 
@@ -25,21 +27,6 @@ interface Sent {
   data: Uint8Array;
   mode?: string;
   options?: { endpoint?: string; sequence?: number };
-}
-
-class RecordingSink implements IpcSink {
-  readonly sent: Sent[] = [];
-  /** Flip to model a link that comes up late, or goes away. */
-  open = true;
-
-  sendToEndpoint(data: Uint8Array, mode?: 'lossy' | 'reliable',
-                 options?: { endpoint?: string; sequence?: number }) {
-    this.sent.push({ data, mode, options });
-  }
-
-  canSend() {
-    return this.open;
-  }
 }
 
 function fakePad(over: Partial<Gamepad> & { buttons?: unknown[] } = {}): Gamepad {
@@ -129,24 +116,24 @@ async function testSnapshot() {
 async function testSampler() {
   console.log('[5] one loop, however many pads arrive');
   pads = [fakePad()];
-  const sink = new RecordingSink();
-  const sampler = new GamepadSampler({ sink, hz: 100 });
+  const camera = new FakeConnection();
+  const sampler = new GamepadSampler({ connection: camera, hz: 100 });
 
   sampler.start();
   sampler.start();  // idempotent: the page this replaces started a second loop here
   fire('gamepadconnected', { gamepad: pads[0] });
   await wait(120);
 
-  const afterOne = sink.sent.length;
+  const afterOne = camera.sent.length;
   check(afterOne > 0, `sampling produced messages (${afterOne} in ~120ms at 100Hz)`);
   check(afterOne < 40, 'and only one loop is running (a doubled loop would roughly double this)');
 
   console.log('[6] every message is addressed and sequenced');
-  const first = sink.sent[0];
+  const first = camera.sent[0];
   check(first.mode === 'lossy', 'sent on the lossy channel');
   check(first.options?.endpoint === 'gamepad', "addressed to the 'gamepad' endpoint");
   check(first.options?.sequence === 1, 'sequence starts at 1, not 0');
-  const sequences = sink.sent.map((s) => s.options?.sequence ?? 0);
+  const sequences = camera.sent.map((s) => s.options?.sequence ?? 0);
   check(sequences.every((n, i) => i === 0 || n > sequences[i - 1]), 'and only ever increases');
 
   console.log('[7] the payload is an InputReport the device can read');
@@ -157,39 +144,39 @@ async function testSampler() {
   check((report.timestamp?.monotonicNs ?? 0) > 0, 'and a monotonic timestamp');
 
   console.log('[8] hiding the document stops sending');
-  const before = sink.sent.length;
+  const before = camera.sent.length;
   visibility = 'hidden';
   fire('visibilitychange', {});
   await wait(120);
-  check(sink.sent.length === before, 'nothing was sent while hidden');
+  check(camera.sent.length === before, 'nothing was sent while hidden');
   check(!sampler.sampling, 'and the timer is actually stopped, not just quiet');
 
   visibility = 'visible';
   fire('visibilitychange', {});
   await wait(60);
-  check(sink.sent.length > before, 'showing it again resumes');
+  check(camera.sent.length > before, 'showing it again resumes');
 
   console.log('[9] a non-standard pad is not sent');
-  const atNonStandard = sink.sent.length;
-  const odd = new RecordingSink();
+  const atNonStandard = camera.sent.length;
+  const odd = new FakeConnection();
   pads = [fakePad({ mapping: '' as GamepadMappingType })];
-  const oddSampler = new GamepadSampler({ sink: odd, hz: 100 });
+  const oddSampler = new GamepadSampler({ connection: odd, hz: 100 });
   oddSampler.start();
   await wait(120);
   check(odd.sent.length === 0, 'nothing was sent for a pad outside the standard mapping');
-  check(sink.sent.length === atNonStandard, 'and the already-running sampler stopped too');
+  check(camera.sent.length === atNonStandard, 'and the already-running sampler stopped too');
   oddSampler.stop();
 
   console.log('[10] stop() ends it');
   // Back to a pad that would be sent, otherwise "nothing was sent" proves nothing.
   pads = [fakePad()];
   await wait(60);
-  check(sink.sent.length > atNonStandard, 'a standard pad is being sent again');
+  check(camera.sent.length > atNonStandard, 'a standard pad is being sent again');
 
   sampler.stop();
-  const atStop = sink.sent.length;
+  const atStop = camera.sent.length;
   await wait(80);
-  check(sink.sent.length === atStop, 'nothing is sent after stop()');
+  check(camera.sent.length === atStop, 'nothing is sent after stop()');
   check(!sampler.sampling, 'and the sampler reports itself stopped');
 
   pads = [];
@@ -198,7 +185,7 @@ async function testSampler() {
 async function testButtonEvents() {
   console.log('[11] button events fire on change only');
   pads = [fakePad()];
-  const sampler = new GamepadSampler({ hz: 100 });   // no sink: local events must still work
+  const sampler = new GamepadSampler({ hz: 100 });   // no connection: local events must still work
   const seen: Array<{ index: number; pressed: boolean }> = [];
   const aPresses: boolean[] = [];
 
@@ -262,9 +249,9 @@ async function testButtonEvents() {
 async function testLinkGating() {
   console.log('[15] a destination handed over before the link is up');
   pads = [fakePad()];
-  const camera = new RecordingSink();
-  camera.open = false;
-  const sampler = new GamepadSampler({ sink: camera, hz: 100 });
+  const camera = new FakeConnection();
+  camera.link = false;
+  const sampler = new GamepadSampler({ connection: camera, hz: 100 });
   const seen: number[] = [];
   sampler.onButtonChange((e) => seen.push(e.index));
 
@@ -279,19 +266,19 @@ async function testLinkGating() {
   check(seen.length === 1, 'but local listeners still fire, so the page works offline');
 
   console.log('[16] and picked up when the link comes up, with no rewiring');
-  camera.open = true;
+  camera.link = true;
   await wait(120);
   check(camera.sent.length > 0, `sending started on its own (${camera.sent.length} messages)`);
   check(camera.sent[0].options?.sequence === 1,
         'and the first message the device sees is sequence 1, not one from the dead ticks');
 
   console.log('[17] and dropped again when it goes away');
-  camera.open = false;
+  camera.link = false;
   const atClose = camera.sent.length;
   await wait(120);
   check(camera.sent.length === atClose, 'nothing is sent after the link closes');
 
-  camera.open = true;
+  camera.link = true;
   await wait(60);
   check(camera.sent.length > atClose, 'and it comes back on reconnect');
   // Nth send carries sequence N; a gap would mean dead ticks were counted.
@@ -303,23 +290,136 @@ async function testLinkGating() {
   pads = [];
 }
 
-async function testAttach() {
-  console.log('[18] attachGamepad starts the loop and sends to the camera');
+/** The least a connection needs: where IPC goes, and whether it can go now. */
+class FakeConnection extends Connection {
+  readonly sent: Sent[] = [];
+  /** Flip to model a link that comes up late, or goes away. */
+  link = true;
+
+  constructor() {
+    super({}, { timeout: 0, isMicOn: false });
+  }
+
+  protected open() {
+    this.setStatus('connected');
+  }
+
+  protected close() {}
+
+  protected peers(): RtcPeer[] {
+    return [];
+  }
+
+  protected deliver(data: Uint8Array, mode: IpcMode, options?: IpcOptions) {
+    if (!this.link) {
+      return false;
+    }
+    this.sent.push({ data, mode, options });
+    return true;
+  }
+
+  protected deliverable() {
+    return this.link;
+  }
+}
+
+async function testConnectionGamepad() {
+  console.log("[18] a connection's gamepad() starts the loop and sends through the connection");
   pads = [fakePad()];
-  const camera = new RecordingSink();
-  const sampler = attachGamepad(camera, { hz: 100 });
+  const camera = new FakeConnection();
+  camera.connect();
+  const sampler = camera.gamepad({ hz: 100 });
   check(sampler.sampling, 'it is already running, with no start() call');
   await wait(120);
   check(camera.sent.length > 0, `and sending (${camera.sent.length} messages)`);
-  check(camera.sent[0].options?.endpoint === 'gamepad', "to the 'gamepad' endpoint");
+  check(camera.sent[0].options?.endpoint === 'gamepad' && camera.sent[0].mode === 'lossy', "to the 'gamepad' endpoint, on lossy");
+  check(camera.gamepad() === sampler, 'one gamepad per connection, so one sequence');
 
-  console.log('[19] stop() detaches it');
-  sampler.stop();
+  console.log('[19] disconnect() stops it, and gamepad() starts it again');
+  camera.disconnect();
+  check(!sampler.sampling, 'the loop is stopped');
   const atStop = camera.sent.length;
   await wait(80);
   check(camera.sent.length === atStop, 'nothing more is sent');
-  check(!sampler.sampling, 'and the loop is stopped');
+  camera.connect();
+  check(camera.gamepad().sampling, 'running again');
+  camera.disconnect();
 
+  pads = [];
+}
+
+/** A room that reaches only the devices in `reachable`, and records who each send went to. */
+class FakeRoom extends SfuRoom<SfuRoomDevice, SfuRoomViewer> {
+  readonly sent: Array<Sent & { to: string[] }> = [];
+  reachable = new Set<string>();
+
+  constructor() {
+    super({ roomId: 'lab-a' }, { timeout: 0, isMicOn: false });
+  }
+
+  get devices(): SfuRoomDevice[] {
+    return [];
+  }
+
+  get viewers(): SfuRoomViewer[] {
+    return [];
+  }
+
+  protected open() {
+    this.setStatus('connected');
+  }
+
+  protected close() {}
+
+  protected peers(): RtcPeer[] {
+    return [];
+  }
+
+  protected deliver(data: Uint8Array, mode: IpcMode, options?: IpcOptions, deviceIds?: string[]) {
+    const to = (deviceIds ?? [...this.reachable]).filter((id) => this.reachable.has(id));
+    if (to.length === 0) {
+      return false;
+    }
+    this.sent.push({ data, mode, options, to });
+    return true;
+  }
+
+  protected deliverable(_mode: IpcMode, deviceIds?: string[]) {
+    return (deviceIds ?? [...this.reachable]).some((id) => this.reachable.has(id));
+  }
+}
+
+async function testRoomGamepad() {
+  console.log('[20] a room sends to deviceIds only, each reached device once per reading');
+  pads = [fakePad()];
+  const room = new FakeRoom();
+  room.reachable = new Set(['a', 'c', 'd']);
+  const sampler = room.gamepad({ hz: 100, deviceIds: ['a', 'b', 'c'] });
+  await wait(120);
+  const to = room.sent.map((s) => s.to.join());
+  check(room.sent.length >= 4 && to.every((t, i) => t === (i % 2 === 0 ? 'a' : 'c')),
+        `to a and c, one at a time: b cannot be reached, d is not listed (${room.sent.length} sends)`);
+  check(room.sent.every((s) => s.mode === 'lossy' && s.options?.endpoint === 'gamepad'), "on lossy, to the 'gamepad' endpoint");
+  const pairs = room.sent.map((s) => s.options?.sequence ?? 0);
+  check(pairs.every((n, i) => n === Math.floor(i / 2) + 1), 'a and c get the same sequence for one reading, and it counts readings');
+
+  console.log('[21] when none of deviceIds can be reached, nothing is sent');
+  room.reachable = new Set(['d']);
+  const atNone = room.sent.length;
+  await wait(80);
+  check(room.sent.length === atNone, 'nothing goes to d');
+
+  console.log('[22] gamepad() without deviceIds keeps them; deviceIds: undefined goes where sendText() goes');
+  check(room.gamepad({ hz: 100 }) === sampler, 'the same sampler');
+  await wait(60);
+  check(room.sent.length === atNone, 'still only a, b and c');
+  const lastSequence = room.sent.at(-1)?.options?.sequence ?? 0;
+  room.gamepad({ deviceIds: undefined });
+  await wait(80);
+  check(room.sent.length > atNone && room.sent.at(-1)?.to.join() === 'd', 'now to every device it reaches');
+  check(room.sent[atNone].options?.sequence === lastSequence + 1, 'and the sequence goes on from the last reading sent');
+
+  sampler.stop();
   pads = [];
 }
 
@@ -328,7 +428,8 @@ async function main() {
   await testSampler();
   await testButtonEvents();
   await testLinkGating();
-  await testAttach();
+  await testConnectionGamepad();
+  await testRoomGamepad();
   console.log(failures === 0 ? '\nALL PASSED' : `\nFAILURES: ${failures}`);
   process.exit(failures === 0 ? 0 : 1);
 }

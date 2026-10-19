@@ -1,6 +1,4 @@
-import type { IpcSink } from '../peer/rtc-peer';
-
-export type { IpcSink };
+import type { Connection } from '../connection/connection';
 
 /** A snapshot of a standard-mapped gamepad. */
 export interface GamepadSnapshot {
@@ -48,8 +46,11 @@ export type SuspendReason =
   | 'disconnected';
 
 export interface GamepadSamplerOptions {
-  /** Destination for samples. Omit to sample without sending. Safe to set before it connects. */
-  sink?: IpcSink | null;
+  /**
+   * @internal The connection that sends the readings. Its `gamepad()` sets it; a sampler made
+   * without one reads the pad without sending.
+   */
+  connection?: Connection | null;
 
   /** Samples per second. Defaults to 60. */
   hz?: number;
