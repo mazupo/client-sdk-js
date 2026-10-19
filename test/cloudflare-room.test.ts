@@ -188,16 +188,25 @@ class FakeChannel extends Emitter {
 }
 
 class FakeTrack {
+  enabled = true;
+  stopped = false;
   constructor(public id: string, public kind: string) {}
+  stop() {
+    this.stopped = true;
+  }
 }
 
 class FakePeer extends Emitter {
   static all: FakePeer[] = [];
   connectionState: RTCPeerConnectionState = "new";
   channels: FakeChannel[] = [];
-  transceivers: { mid: string; receiver: { track: FakeTrack; jitterBufferTarget?: number | null } }[] = [];
+  transceivers: any[] = [];
   localDescription: RTCSessionDescriptionInit | null = null;
   remote: RTCSessionDescriptionInit[] = [];
+  signalingState: RTCSignalingState = "stable";
+  rollbacks = 0;
+  /** Our own microphone, once offered. */
+  micTransceiver: any = null;
   private offers = 0;
   constructor(public config: RTCConfiguration) {
     super();
@@ -215,10 +224,38 @@ class FakePeer extends Emitter {
     return { type: "answer", sdp: `answer-${FakePeer.all.indexOf(this)}` };
   }
   async setLocalDescription(description: RTCSessionDescriptionInit) {
+    if (description.type === "rollback") {
+      this.rollbacks++;
+      this.signalingState = "stable";
+      return;
+    }
     this.localDescription = description;
+    this.signalingState = description.type === "offer" ? "have-local-offer" : "stable";
+    // An offer gives a mid to a transceiver added for it.
+    for (const transceiver of this.transceivers) {
+      if (!transceiver.mid) {
+        transceiver.mid = `mic-${FakePeer.all.indexOf(this)}`;
+      }
+    }
   }
   async setRemoteDescription(description: RTCSessionDescriptionInit) {
     this.remote.push(description);
+    this.signalingState = description.type === "offer" ? "have-remote-offer" : "stable";
+  }
+  addTransceiver(track: FakeTrack, init: RTCRtpTransceiverInit) {
+    const transceiver = {
+      mid: "",
+      direction: init.direction,
+      sender: { track },
+      receiver: { track: null },
+      stopped: false,
+      stop() {
+        this.stopped = true;
+      },
+    };
+    this.transceivers.push(transceiver);
+    this.micTransceiver = transceiver;
+    return transceiver;
   }
   getTransceivers() {
     return this.transceivers;
@@ -258,7 +295,43 @@ class FakePeer extends Emitter {
   getTracks() {
     return this.tracks;
   }
+  getAudioTracks() {
+    return this.tracks.filter((track) => track.kind === "audio");
+  }
 };
+
+// --- microphone ------------------------------------------------------------------------------
+
+/** Our own offers that publish the microphone: the ones with a track. */
+function micOffers(ws: { requests(kind: string): any[] }): any[] {
+  return ws.requests("offer").filter((offer) => offer.tracks?.length > 0);
+}
+
+let micResult: "grant" | "deny" = "grant";
+let micRequests = 0;
+/** While true, the browser keeps asking: each request waits for its function in heldMics. */
+let micHold = false;
+const heldMics: (() => void)[] = [];
+/** Every microphone track the browser gave. */
+const micTracks: FakeTrack[] = [];
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  writable: true,
+  value: {
+    mediaDevices: {
+      async getUserMedia() {
+        micRequests++;
+        if (micResult === "deny") {
+          throw new Error("Permission denied");
+        }
+        const track = new FakeTrack(`mic-${micRequests}`, "audio");
+        micTracks.push(track);
+        const stream = new (globalThis as any).MediaStream([track]);
+        return micHold ? new Promise((resolve) => heldMics.push(() => resolve(stream))) : stream;
+      },
+    },
+  },
+});
 
 // --- helpers ---------------------------------------------------------------------------------
 
@@ -289,7 +362,7 @@ interface Setup {
 /** A room joined with these devices, its own offer answered and its PeerConnection connected. */
 async function joinedRoom(
   devices: DeviceInfo[],
-  options: { ipc?: boolean; connect?: boolean; viewers?: { viewerId: string; dataChannels?: boolean; away?: boolean }[] } = {},
+  options: { ipc?: boolean; connect?: boolean; microphone?: boolean; viewers?: ({ viewerId: string } & Record<string, unknown>)[] } = {},
 ): Promise<Setup> {
   const room = new CloudflareRoom({
     apiUrl: "https://worker.test/cloudflare/",
@@ -297,6 +370,7 @@ async function joinedRoom(
     roomId: "lab-a",
     viewerId: "alice",
     ipc: options.ipc,
+    microphone: options.microphone ?? false,
   });
   let latest: RoomDevice[] = [];
   const statuses: ConnectionStatus[] = [];
@@ -714,7 +788,7 @@ async function main() {
   {
     reset();
     tokenStatus = 401;
-    const room = new CloudflareRoom({ apiUrl: "https://worker.test/cloudflare", apiKey: "wrong", roomId: "lab-a" });
+    const room = new CloudflareRoom({ apiUrl: "https://worker.test/cloudflare", apiKey: "wrong", roomId: "lab-a", microphone: false });
     const errors: ConnectionError[] = [];
     const statuses: ConnectionStatus[] = [];
     room.onError = (error) => errors.push(error);
@@ -786,8 +860,8 @@ async function main() {
     check(
       JSON.stringify(setup.viewerLists.at(-1)) ===
         JSON.stringify([
-          { viewerId: "alice", ipc: true, away: false, me: true },
-          { viewerId: "Bob Lee", ipc: false, away: false, me: false },
+          { viewerId: "alice", ipc: true, away: false, me: true, microphone: false, muted: false },
+          { viewerId: "Bob Lee", ipc: false, away: false, me: false, microphone: false, muted: false },
         ]),
       "joined lists everyone, this viewer marked",
     );
@@ -796,6 +870,169 @@ async function main() {
     check(setup.room.viewers[1]?.away === true && setup.viewerLists.length === 2, "viewers updates the list");
     setup.room.disconnect();
     check(setup.viewerLists.at(-1)?.length === 0, "empty after leave");
+  }
+
+  console.log("[21] the microphone: offered after our own offer, muted until toggleMic, again on a new PeerConnection");
+  {
+    reset();
+    micResult = "grant";
+    micRequests = 0;
+    const setup = await joinedRoom([], { microphone: true });
+    await flush();
+    const offers = micOffers(setup.ws);
+    check(offers.length === 1 && offers[0].tracks[0].trackName === "microphone" && offers[0].tracks[0].mid === "mic-0", "microphone offer sent, with its mid");
+    check(setup.ws.requests("mute").at(-1)?.muted === true, "after mute: it starts muted");
+    check(setup.pc.micTransceiver?.direction === "sendonly", "the microphone is sendonly");
+    check(setup.pc.micTransceiver.sender.track.enabled === false, "and its track starts disabled");
+    setup.ws.receive({ answer: { sdp: "mic-answer" } });
+    await flush();
+    check(setup.pc.remote.at(-1)?.sdp === "mic-answer", "its answer applied");
+    setup.room.toggleMic(true);
+    check(setup.ws.requests("mute").at(-1)?.muted === false && setup.pc.micTransceiver.sender.track.enabled === true, "unmuting enables the track and tells the room");
+    setup.room.toggleMic(false);
+    check(setup.ws.requests("mute").at(-1)?.muted === true && setup.pc.micTransceiver.sender.track.enabled === false, "muting too");
+
+    setup.pc.setState("failed");
+    await flush();
+    const pc2 = FakePeer.all.at(-1)!;
+    setup.ws.receive({ answer: { sdp: "sfu-answer-2" } });
+    await flush();
+    pc2.setState("connected");
+    await flush();
+    check(micOffers(setup.ws).length === 2 && micRequests === 1, "offered again on the new PeerConnection, without asking the browser again");
+    const track = pc2.micTransceiver.sender.track;
+    setup.room.disconnect();
+    check(track.stopped === true, "disconnect gives the microphone back");
+  }
+
+  console.log("[22] other viewers' microphones are pulled, and their voices listed");
+  {
+    reset();
+    const setup = await joinedRoom([], {
+      viewers: [{ viewerId: "alice" }, { viewerId: "bob", microphone: true, microphoneGeneration: 1 }],
+    });
+    await flush();
+    check(JSON.stringify(setup.ws.requests("subscribe").at(-1)?.microphones) === JSON.stringify(["bob"]), "subscribe microphones: [bob]");
+    const tracks = [{ viewerId: "bob", trackName: "microphone", mid: "7", generation: 1 }];
+    setup.ws.receive({ offer: { sdp: "sfu-offer", tracks } });
+    await flush();
+    setup.pc.addTrack("7", "audio");
+    setup.ws.receive({ subscribed: { tracks, data: [] } });
+    await flush();
+    const bob = setup.room.viewers.find((viewer) => viewer.viewerId === "bob");
+    check(bob?.microphone === true && bob.stream?.getTracks()[0]?.kind === "audio", "bob's voice is on his entry");
+    check(setup.viewerLists.at(-1)?.find((viewer) => viewer.viewerId === "bob")?.stream !== undefined, "and onViewers reported it");
+    setup.ws.receive({ viewers: { viewers: [{ viewerId: "alice" }, { viewerId: "bob", microphone: false, microphoneGeneration: 1 }] } });
+    await flush();
+    check(JSON.stringify(setup.ws.requests("unsubscribe").at(-1)?.mids) === JSON.stringify(["7"]), "unsubscribed when bob stopped publishing");
+    setup.room.disconnect();
+  }
+
+  console.log("[23] a full room: the offer is rolled back, and this viewer only listens");
+  {
+    reset();
+    micResult = "grant";
+    const setup = await joinedRoom([], { microphone: true });
+    await flush();
+    setup.ws.receive({ error: { code: ErrorCode.ERROR_CODE_MICROPHONE_LIMIT, request: "offer", trackName: "microphone", message: "Room lab-a already has 10 microphones." } });
+    await flush();
+    check(setup.pc.rollbacks === 1 && setup.pc.micTransceiver.stopped === true, "rolled back, the transceiver stopped");
+    check(setup.errors.at(-1)?.code === "microphone_limit", "onError microphone_limit");
+    await advance(60_000);
+    check(micOffers(setup.ws).length === 1, "not offered again");
+    setup.room.disconnect();
+  }
+
+  console.log("[24] a microphone offer the SFU could not take is tried again later");
+  {
+    reset();
+    micResult = "grant";
+    const setup = await joinedRoom([], { microphone: true });
+    await flush();
+    setup.ws.receive({ error: { code: ErrorCode.ERROR_CODE_SFU, request: "offer", trackName: "microphone", message: "The SFU did not answer." } });
+    await flush();
+    check(setup.pc.rollbacks === 1, "rolled back");
+    await advance(1_900);
+    check(micOffers(setup.ws).length === 1, "not at once");
+    await advance(200);
+    check(micOffers(setup.ws).length === 2, "offered again after 2 s");
+    setup.room.disconnect();
+  }
+
+  console.log("[25] no microphone from the browser: onError, and the room goes on");
+  {
+    reset();
+    micResult = "deny";
+    const setup = await joinedRoom([device("cam", LIVE, 1)], { microphone: true });
+    await flush();
+    check(setup.errors.some((error) => error.code === "microphone"), "onError microphone");
+    check(micOffers(setup.ws).length === 0, "nothing offered");
+    check(setup.ws.requests("subscribe").length === 1, "the device is still subscribed");
+    micResult = "grant";
+    setup.room.disconnect();
+  }
+
+  console.log("[26] microphone: false never asks for it");
+  {
+    reset();
+    micRequests = 0;
+    const setup = await joinedRoom([]);
+    await flush();
+    check(micRequests === 0 && micOffers(setup.ws).length === 0, "no getUserMedia, no offer");
+    setup.room.disconnect();
+  }
+
+  console.log("[27] an answer the SFU did not take: a new PeerConnection and our own offer again");
+  {
+    reset();
+    const setup = await joinedRoom([device("cam", LIVE, 1)]);
+    setup.ws.receive({ offer: { sdp: "sfu-offer", tracks: [{ deviceId: "cam", trackName: "video", mid: "1", generation: 1 }] } });
+    await flush();
+    check(setup.ws.requests("answer").length === 1, "answered the SFU's offer");
+    setup.ws.receive({ error: { code: ErrorCode.ERROR_CODE_NO_OFFER, message: "There is no offer waiting for an answer.", request: "answer" } });
+    await flush();
+    check(FakePeer.all.length === 1, "no offer waiting: the same PeerConnection");
+    const offers = setup.ws.requests("offer").length;
+    setup.ws.receive({ error: { code: ErrorCode.ERROR_CODE_SFU, message: "Could not renegotiate.", request: "answer" } });
+    await flush();
+    check(FakePeer.all.length === 2 && setup.pc.connectionState === "closed", "the SFU failed: a new PeerConnection");
+    check(setup.ws.requests("offer").length === offers + 1, "and its own offer");
+    setup.room.disconnect();
+  }
+
+  console.log("[28] disconnect while the browser asks for the microphone: that one stops, the next connect asks once");
+  {
+    reset();
+    micRequests = 0;
+    micTracks.length = 0;
+    micHold = true;
+    const room = new CloudflareRoom({ apiUrl: "https://worker.test/cloudflare", apiKey: "viewer-key", roomId: "lab-a", microphone: true });
+    room.connect();
+    await flush();
+    room.disconnect();
+    room.connect();
+    await flush();
+    check(micRequests === 2, "asked again after connect");
+    for (const grant of heldMics.splice(0)) {
+      grant();
+    }
+    await flush();
+    check(micTracks[0]?.stopped === true, "the first, voided by disconnect, is stopped");
+    check(micTracks[1]?.stopped === false, "the second is kept");
+    micHold = false;
+    room.disconnect();
+    check(micTracks[1]?.stopped === true, "stopped on disconnect");
+  }
+
+  console.log("[29] members carry the newest device info");
+  {
+    reset();
+    const setup = await joinedRoom([device("cam", SLEEPING, 1)]);
+    setup.ws.receive({ members: { devices: [device("cam", LIVE, 2)] } });
+    await flush();
+    const cam = setup.devices().find((info) => info.deviceId === "cam");
+    check(cam?.state === "live" && cam?.generation === 2, "the list's info, not the one kept from before");
+    setup.room.disconnect();
   }
 }
 

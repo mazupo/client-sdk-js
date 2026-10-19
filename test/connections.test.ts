@@ -26,8 +26,11 @@ const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 class FakeTrack {
   enabled = true;
+  stopped = false;
   constructor(public id: string, public kind: string) {}
-  stop() {}
+  stop() {
+    this.stopped = true;
+  }
 }
 
 class FakeStream {
@@ -100,6 +103,11 @@ class FakePeer {
     return channel;
   }
   addTransceiver() {}
+  /** Tracks this side sends, such as the microphone. */
+  localTracks: FakeTrack[] = [];
+  addTrack(track: FakeTrack) {
+    this.localTracks.push(track);
+  }
   getTransceivers() {
     return [];
   }
@@ -125,6 +133,7 @@ class FakePeer {
   }
   close() {
     this.connectionState = "closed";
+    this.signalingState = "closed";
   }
   setState(state: RTCPeerConnectionState) {
     this.connectionState = state;
@@ -277,7 +286,7 @@ async function mqttCamera() {
 
 async function liveKitRoom() {
   console.log("[9] connect: the relay URL, then a publisher offer after join");
-  const room = new LiveKitRoom({ url: "wss://relay.test", apiKey: "lk-key", roomId: "lab-a", viewerId: "alice", timeout: 0 });
+  const room = new LiveKitRoom({ url: "wss://relay.test", apiKey: "lk-key", roomId: "lab-a", viewerId: "alice", timeout: 0, microphone: false });
   let devices: LiveKitDevice[] = [];
   let viewers: LiveKitViewer[] = [];
   const messages: { data: string; deviceId: string }[] = [];
@@ -357,6 +366,59 @@ async function liveKitRoom() {
   ws.receive("leave", "");
   check(errors[0]?.code === "left" && room.status === "closed", "onError left, then closed");
   check(publisher.connectionState === "closed" && subscriber.connectionState === "closed", "both PeerConnections closed");
+
+  console.log("[16] the microphone: announced before the publisher's offer, muted; others' voices on their entries");
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    writable: true,
+    value: { mediaDevices: { getUserMedia: async () => new FakeStream([new FakeTrack("mic", "audio")]) } },
+  });
+  const talker = new LiveKitRoom({ url: "wss://relay.test", apiKey: "lk-key", roomId: "lab-b", viewerId: "carol", timeout: 0 });
+  let talkers: LiveKitViewer[] = [];
+  talker.onViewers = (list) => (talkers = list);
+  talker.connect();
+  const ws2 = FakeSocket.all.at(-1)!;
+  ws2.open();
+  const first = FakePeer.all.length;
+  ws2.receive("join", { urls: ["stun:relay.test"] });
+  await wait(10);
+  const actions = ws2.sent.map((frame) => frame.action);
+  check(actions.indexOf("addAudioTrack") >= 0 && actions.indexOf("addAudioTrack") < actions.indexOf("offer"), "addAudioTrack goes before the offer");
+  check(ws2.actions("addAudioTrack")[0]?.message === "microphone", "named microphone");
+  const mic = FakePeer.all[first].localTracks[0];
+  check(mic?.kind === "audio" && mic.enabled === false, "the publisher sends the microphone, muted");
+  talker.toggleMic(true);
+  check(mic.enabled === true && talker.isMicOn, "toggleMic(true) unmutes it");
+  ws2.receive("participant", [{ sid: "PA_dave", id: "dave", state: "ACTIVE" }]);
+  FakePeer.all[first + 1].track("audio", "PA_dave|TR_mic");
+  await wait(1);
+  check(talkers.find((v) => v.viewerId === "dave")?.stream?.getAudioTracks().length === 1, "dave's voice is on his viewer entry");
+  talker.disconnect();
+
+  console.log("[17] leaving while the browser asks for the microphone stops it, and sends nothing more");
+  const late = new FakeTrack("late-mic", "audio");
+  let grant = () => {};
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    writable: true,
+    value: { mediaDevices: { getUserMedia: () => new Promise((resolve) => (grant = () => resolve(new FakeStream([late])))) } },
+  });
+  const leaver = new LiveKitRoom({ url: "wss://relay.test", apiKey: "lk-key", roomId: "lab-c", viewerId: "erin", timeout: 0 });
+  const leaverErrors: string[] = [];
+  leaver.onError = (error) => leaverErrors.push(error.code);
+  leaver.connect();
+  const ws3 = FakeSocket.all.at(-1)!;
+  ws3.open();
+  const publisherIndex = FakePeer.all.length;
+  ws3.receive("join", { urls: ["stun:relay.test"] });
+  await wait(5);
+  leaver.disconnect();
+  grant();
+  await wait(10);
+  check(late.stopped, "the microphone that came late is stopped");
+  check(FakePeer.all[publisherIndex].localTracks.length === 0, "not added to the closed PeerConnection");
+  check(ws3.actions("addAudioTrack").length === 0 && ws3.actions("offer").length === 0, "no addAudioTrack, no offer");
+  check(leaverErrors.length === 0, "no error after leaving");
 }
 
 async function main() {
