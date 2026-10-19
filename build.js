@@ -19,6 +19,7 @@ const tests = [
   { in: 'test/gamepad-react.test.tsx', out: '.test-build/gamepad-react.cjs' },
   { in: 'test/max-bitrate.test.ts', out: '.test-build/max-bitrate.cjs' },
   { in: 'test/cloudflare-room.test.ts', out: '.test-build/cloudflare-room.cjs' },
+  { in: 'test/connections.test.ts', out: '.test-build/connections.cjs', alias: { mqtt: './test/fakes/mqtt.ts' } },
 ];
 
 async function run() {
@@ -44,6 +45,7 @@ async function run() {
         format: 'cjs',
         entryPoints: [test.in],
         outfile: test.out,
+        alias: test.alias,
       });
     }
   }
