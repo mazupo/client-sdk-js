@@ -5,15 +5,14 @@ The browser buffers a few hundred milliseconds of video before it plays. On a fa
 ## Set the buffer
 
 ```javascript
-import { PiCamera } from '@mazupo/client';
+import { MqttCamera } from '@mazupo/client';
 
-const camera = new PiCamera({
-  uid: 'your-custom-uid',
-  mqttHost: 'your.mqtt.cloud',
-  mqttPath: '/mqtt',
-  mqttPort: 8084,
-  mqttUsername: 'hakunamatata',
-  mqttPassword: 'Wonderful',
+const camera = new MqttCamera({
+  deviceId: 'your-device-id',
+  host: 'your.mqtt.cloud',
+  port: 8084,
+  username: 'hakunamatata',
+  password: 'Wonderful',
   stunUrls: ['stun:stun1.l.google.com:19302'],
   jitterBufferTarget: 10,
 });
@@ -54,4 +53,4 @@ setInterval(async () => {
 }, 2000);
 ```
 
-See [setJitterBufferTarget](../reference/methods.md#setjitterbuffertarget) for the browser support.
+See [setJitterBufferTarget](../reference/connection.md#setjitterbuffertarget) for the browser support. `LiveKitRoom` and `CloudflareRoom` take `jitterBufferTarget` too.

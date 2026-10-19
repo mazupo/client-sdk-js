@@ -1,17 +1,16 @@
 # Snapshots
 
-Take a still image from the device. With `datachannelOnly: true`, the device sends no video at all, so nothing is encoded or uploaded until you ask for the image. The image arrives base64-encoded, after every part of it is in.
+Take a still image from the device. Snapshots need an `MqttCamera`. With `datachannelOnly: true`, the device sends no video until you ask. The image arrives base64-encoded.
 
 ```javascript
-import { ChannelRole, PiCamera } from '@mazupo/client';
+import { ChannelRole, MqttCamera } from '@mazupo/client';
 
-const camera = new PiCamera({
-  uid: 'your-custom-uid',
-  mqttHost: 'your.mqtt.cloud',
-  mqttPath: '/mqtt',
-  mqttPort: 8084,
-  mqttUsername: 'hakunamatata',
-  mqttPassword: 'Wonderful',
+const camera = new MqttCamera({
+  deviceId: 'your-device-id',
+  host: 'your.mqtt.cloud',
+  port: 8084,
+  username: 'hakunamatata',
+  password: 'Wonderful',
   stunUrls: ['stun:stun1.l.google.com:19302'],
   datachannelOnly: true,
 });
@@ -24,7 +23,7 @@ camera.onDatachannel = (role) => {
 
 camera.onSnapshot = (base64Image) => {
   console.log(base64Image);
-  camera.terminate();
+  camera.disconnect();
 };
 
 camera.connect();

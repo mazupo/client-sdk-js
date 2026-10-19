@@ -1,21 +1,20 @@
 # Recording
 
-Start and stop the device's recorder, and download recorded files. Both use the DataChannel, so they need the `mqtt` signaling.
+Start and stop the device's recorder, and download recorded files. Both use the DataChannel, so they need an `MqttCamera`.
 
 ## Start and stop recording
 
 The device must run with `--record-mode=on-demand` (or `both`). Recording runs until you call `stopRecording()`. Nothing ends the file on its own. `onRecording` reports each change, with the path of the file.
 
 ```javascript
-import { ChannelRole, PiCamera } from '@mazupo/client';
+import { ChannelRole, MqttCamera } from '@mazupo/client';
 
-const camera = new PiCamera({
-  uid: 'your-custom-uid',
-  mqttHost: 'your.mqtt.cloud',
-  mqttPath: '/mqtt',
-  mqttPort: 8084,
-  mqttUsername: 'hakunamatata',
-  mqttPassword: 'Wonderful',
+const camera = new MqttCamera({
+  deviceId: 'your-device-id',
+  host: 'your.mqtt.cloud',
+  port: 8084,
+  username: 'hakunamatata',
+  password: 'Wonderful',
   stunUrls: ['stun:stun1.l.google.com:19302'],
   datachannelOnly: true,
 });
@@ -43,15 +42,14 @@ camera.connect();
 This lists the recordings, downloads the newest file, and saves it as a normal browser download. `onProgress` reports the bytes as they arrive.
 
 ```javascript
-import { PiCamera } from '@mazupo/client';
+import { MqttCamera } from '@mazupo/client';
 
-const camera = new PiCamera({
-  uid: 'your-custom-uid',
-  mqttHost: 'your.mqtt.cloud',
-  mqttPath: '/mqtt',
-  mqttPort: 8084,
-  mqttUsername: 'hakunamatata',
-  mqttPassword: 'Wonderful',
+const camera = new MqttCamera({
+  deviceId: 'your-device-id',
+  host: 'your.mqtt.cloud',
+  port: 8084,
+  username: 'hakunamatata',
+  password: 'Wonderful',
   datachannelOnly: true,
   stunUrls: ['stun:stun1.l.google.com:19302'],
 });
@@ -80,10 +78,10 @@ camera.onVideoDownloaded = (file) => {
   document.body.removeChild(anchor);
   URL.revokeObjectURL(url);
 
-  camera.terminate();
+  camera.disconnect();
 };
 
 camera.connect();
 ```
 
-To page through older files, see [fetchVideoList](../reference/methods.md#fetchvideolist). For the files on the device, see [Recording in the pi-webrtc docs](https://mazupo.com/docs/pi-webrtc/recording).
+To page through older files, see [fetchVideoList](../reference/mqtt-camera.md#fetchvideolist). For the files on the device, see [Recording in the pi-webrtc docs](https://mazupo.com/docs/pi-webrtc/recording).

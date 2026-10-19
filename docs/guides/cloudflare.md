@@ -1,10 +1,8 @@
 # Cloudflare Realtime
 
-Watch every device in a room through Cloudflare's Realtime SFU. A [cf-sfu-worker](https://github.com/mazupo/cf-sfu-worker) sits in between: it gives out access tokens, wakes the devices, and talks to the SFU. The Cloudflare app secret stays in the worker, so the browser only needs a viewer key.
+Use `CloudflareRoom` to watch every device in a room through Cloudflare Realtime SFU. A [cf-sfu-worker](https://github.com/mazupo/cf-sfu-worker) gives out access tokens and wakes the devices. The browser only needs the viewer public key.
 
-A device publishes only while someone watches its room. When the first viewer joins, the device wakes and starts to stream. When the last viewer leaves, it stops.
-
-Use `CloudflareRoom` for this, not `PiCamera`. One `CloudflareRoom` shows every device in one room, over one connection.
+A device streams only while someone watches its room.
 
 ## Free test server
 
@@ -14,7 +12,7 @@ Use `CloudflareRoom` for this, not `PiCamera`. One `CloudflareRoom` shows every 
 | --- | --- |
 | `https://api.mazupo.com/cloudflare` | `VIEWER_PUBLIC_KEY` |
 
-First, start a device on the same server, as shown in [SFU: Cloudflare Realtime](https://mazupo.com/docs/pi-webrtc/signaling/sfu#cloudflare-realtime) in the pi-webrtc docs. That page also lists the limits of the test server. All users share it, so use a room name that nobody else uses.
+Start a device on the same server first. See [SFU: Cloudflare Realtime](https://mazupo.com/docs/pi-webrtc/signaling/sfu#cloudflare-realtime). The server is shared, so use a room name nobody else uses.
 
 ## Watch a room
 
@@ -55,7 +53,7 @@ room.onError = (error) => {
 
 room.connect();
 
-// Later: room.leave();
+// Later: room.disconnect();
 ```
 
 Each device has a `state`:
@@ -71,7 +69,7 @@ If a device does not play, its `error` says why. For example, `viewer_limit` mea
 
 With `ipc: true`, the room also opens each device's IPC channels, `_lossy` and `_reliable`. Messages from a device arrive in `onMessage`. The device must run with `--enable-ipc`.
 
-Only one viewer controls a device at a time. Only that viewer's messages reach the device. Everyone else waits in line.
+Only the viewer that controls a device can send to it. Others wait in line.
 
 ```javascript
 const room = new CloudflareRoom({
@@ -81,14 +79,14 @@ const room = new CloudflareRoom({
   ipc: true,
 });
 
-room.onMessage = (deviceId, data) => {
+room.onMessage = (data, deviceId) => {
   console.log(deviceId, new TextDecoder().decode(data));
 };
 
 room.onDevices = (devices) => {
   const rudder = devices.find((device) => device.deviceId === 'rudder');
   if (rudder?.canSend) {
-    room.sendText('rudder', 'hello');
+    room.sendTextTo('rudder', 'hello');
   }
 };
 
@@ -101,18 +99,20 @@ room.takeControl('rudder');
 room.releaseControl('rudder');
 ```
 
+`sendText(text)` goes to every device that you control. `sendTextTo(deviceId, text)` goes to one of them.
+
 `device.control` tells who controls the device, who takes over next, and who waits. `control.mine` is `true` when you control it.
 
 ## Drive a device with a gamepad
 
-`room.ipcSink(deviceId)` works in place of a `PiCamera` for `attachGamepad`. Take control of the device first.
+Take control of the device, then start the gamepad. It goes to every device that you control, or only to `deviceIds`:
 
 ```javascript
-import { attachGamepad } from '@mazupo/client/gamepad';
-
 room.takeControl('rudder');
-const pad = attachGamepad(room.ipcSink('rudder'), { hz: 60 });
+room.gamepad({ deviceIds: ['rudder'] });
 ```
+
+See [Gamepad](gamepad.md) for more.
 
 ## Keep the viewer after a reload
 
@@ -139,6 +139,6 @@ Use one id per tab. When a second tab joins with the same id, the first tab stop
 
 - It reconnects after the network drops, and it gets a new access token each time.
 - It makes a new connection to the SFU when the old one fails, for example after a network change.
-- When the page closes or reloads, the worker keeps your place for 30 seconds, so a reload carries on where it left off.
+- After a reload, it carries on where it left off.
 
 See [CloudflareRoom](../reference/cloudflare-room.md) for every option, event and method.

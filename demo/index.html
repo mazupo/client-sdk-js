@@ -68,26 +68,19 @@
   </div>
 
   <script type="module">
-    import { CloudflareRoom, PiCamera } from 'https://cdn.jsdelivr.net/npm/@mazupo/client@4/dist/index.esm.js';
+    import { CloudflareRoom, LiveKitRoom, MqttCamera } from 'https://cdn.jsdelivr.net/npm/@mazupo/client@4/dist/index.esm.js';
 
     let videoRef = document.getElementById('videoElement');
     let conn = null;
 
     window.start = function start() {
-      const uid = document.getElementById('uid').value;
-      const mqttHost = document.getElementById('mqttHost').value;
-      const mqttPath = document.getElementById('mqttPath').value;
-      const mqttPort = parseInt(document.getElementById('mqttPort').value);
-      const mqttUsername = document.getElementById('mqttUsername').value;
-      const mqttPassword = document.getElementById('mqttPassword').value;
-
-      conn = new PiCamera({
-        uid: uid,
-        mqttHost: mqttHost,
-        mqttPath: mqttPath,
-        mqttPort: mqttPort,
-        mqttUsername: mqttUsername,
-        mqttPassword: mqttPassword,
+      conn = new MqttCamera({
+        deviceId: document.getElementById('uid').value,
+        host: document.getElementById('mqttHost').value,
+        path: document.getElementById('mqttPath').value,
+        port: parseInt(document.getElementById('mqttPort').value),
+        username: document.getElementById('mqttUsername').value,
+        password: document.getElementById('mqttPassword').value,
         stunUrls: ["stun:stun1.l.google.com:19302", "stun:stun2.l.google.com:19302"],
         jitterBufferTarget: Number(document.getElementById('jitterBufferTarget').value),
       });
@@ -98,9 +91,7 @@
     };
 
     window.stop = function stop() {
-      if (conn) {
-        conn.terminate();
-      }
+      conn?.disconnect();
     };
 
     window.setJitterBufferTarget = function setJitterBufferTarget(value) {
@@ -118,26 +109,20 @@
     let sfuConn = null;
 
     window.join = function join() {
-      const livekitUrl = document.getElementById('livekitUrl').value;
-      const livekitKey = document.getElementById('livekitKey').value;
-      const livekitRoom = document.getElementById('livekitRoom').value;
-
-      sfuConn = new PiCamera({
-        signaling: 'livekit',
-        livekitUrl: livekitUrl,
-        livekitKey: livekitKey,
-        livekitRoom: livekitRoom
+      sfuConn = new LiveKitRoom({
+        url: document.getElementById('livekitUrl').value,
+        apiKey: document.getElementById('livekitKey').value,
+        roomId: document.getElementById('livekitRoom').value,
       });
-      sfuConn.onSfuStream = (sid, stream) => {
-        sfuVideoRef.srcObject = stream;
+      // Shows the first device in the room.
+      sfuConn.onDevices = (devices) => {
+        sfuVideoRef.srcObject = devices[0]?.stream ?? null;
       };
       sfuConn.connect();
     };
 
     window.leave = function leave() {
-      if (sfuConn) {
-        sfuConn.terminate();
-      }
+      sfuConn?.disconnect();
     };
 
     // ===============
@@ -175,7 +160,7 @@
     };
 
     window.leaveRoom = function leaveRoom() {
-      cfRoom?.leave();
+      cfRoom?.disconnect();
       cfTiles.replaceChildren();
     };
   </script>

@@ -5,15 +5,14 @@ Limit how much video the device sends to a viewer. A small tile on a monitoring 
 The browser does not tell the device how big the video is on the screen. A 160×90 tile still gets the full stream. Set `maxBitrate` to cap it:
 
 ```javascript
-import { PiCamera } from '@mazupo/client';
+import { MqttCamera } from '@mazupo/client';
 
-const camera = new PiCamera({
-  uid: 'your-custom-uid',
-  mqttHost: 'your.mqtt.cloud',
-  mqttPath: '/mqtt',
-  mqttPort: 8084,
-  mqttUsername: 'hakunamatata',
-  mqttPassword: 'Wonderful',
+const camera = new MqttCamera({
+  deviceId: 'your-device-id',
+  host: 'your.mqtt.cloud',
+  port: 8084,
+  username: 'hakunamatata',
+  password: 'Wonderful',
   stunUrls: ['stun:stun1.l.google.com:19302'],
   maxBitrate: 500, // kbps
 });
@@ -39,8 +38,8 @@ The scene was mostly still. A busy scene drops to a lower resolution sooner.
 
 ## Limits
 
-- It works with `mqtt` only. There, each viewer has its own connection and encoder on the device. With `livekit` or `CloudflareRoom`, all viewers share one stream: set `--max-bitrate` on the device instead.
-- You set it when you connect. To change it, call `terminate()`, and connect again with the new value.
+- It works with `MqttCamera` only. There, each viewer has its own connection and encoder on the device. In a `LiveKitRoom` or `CloudflareRoom`, all viewers share one stream: set `--max-bitrate` on the device instead.
+- You set it when you create the camera. To change it, call `disconnect()`, and connect a new `MqttCamera` with the new value.
 - The device's own `--max-bitrate` still applies. The lower of the two wins.
 
 ## How it works

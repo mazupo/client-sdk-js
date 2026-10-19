@@ -12,12 +12,12 @@ npm install react-native-webrtc @mazupo/client
 
 ## 2. Show the video
 
-`registerGlobals()` must run once when the app starts, before you create any `PiCamera`. The stream arrives as an `RNMediaStream`. Its `toURL()` gives the URL for `RTCView`.
+`registerGlobals()` must run once when the app starts, before you create any `MqttCamera`. The stream arrives as an `RNMediaStream`. Its `toURL()` gives the URL for `RTCView`.
 
 ```tsx
 import React, { useEffect, useState } from 'react';
 import { RTCView, registerGlobals } from 'react-native-webrtc';
-import { PiCamera, RNMediaStream } from '@mazupo/client';
+import { MqttCamera, RNMediaStream } from '@mazupo/client';
 
 registerGlobals();
 
@@ -25,13 +25,12 @@ export default function App() {
   const [streamUrl, setStreamUrl] = useState<string | null>(null);
 
   useEffect(() => {
-    const camera = new PiCamera({
-      uid: 'your-custom-uid',
-      mqttHost: 'your.mqtt.cloud',
-      mqttPath: '/mqtt',
-      mqttPort: 8084,
-      mqttUsername: 'hakunamatata',
-      mqttPassword: 'Wonderful',
+    const camera = new MqttCamera({
+      deviceId: 'your-device-id',
+      host: 'your.mqtt.cloud',
+      port: 8084,
+      username: 'hakunamatata',
+      password: 'Wonderful',
       stunUrls: ['stun:stun1.l.google.com:19302'],
     });
 
@@ -42,7 +41,7 @@ export default function App() {
     camera.connect();
 
     return () => {
-      camera.terminate();
+      camera.disconnect();
     };
   }, []);
 
@@ -54,9 +53,9 @@ export default function App() {
 }
 ```
 
-`uid` must match the `--uid` of the device, and the MQTT settings are for the broker that the device uses.
+`deviceId` must match the `--uid` of the device, and the MQTT settings are for the broker that the device uses.
 
 ## Next steps
 
 - [Guides](../guides/README.md): snapshots, recording, IPC messages and more.
-- [Options](../reference/options.md): every option of `PiCamera`.
+- [MqttCamera](../reference/mqtt-camera.md): every option, event and method.

@@ -1,6 +1,8 @@
 # CloudflareRoom
 
-`CloudflareRoom` watches one room of a [cf-sfu-worker](https://github.com/mazupo/cf-sfu-worker): every device in the room, over one WebSocket and one WebRTC connection. See the [Cloudflare Realtime guide](../guides/cloudflare.md) for examples.
+`CloudflareRoom` watches every device in one room of a [cf-sfu-worker](https://github.com/mazupo/cf-sfu-worker). See the [Cloudflare Realtime guide](../guides/cloudflare.md) for examples.
+
+It is a [connection](connection.md) and a [room](connection.md#rooms).
 
 ```javascript
 import { CloudflareRoom } from '@mazupo/client';
@@ -12,6 +14,8 @@ room.connect();
 
 ## Options
 
+Next to the [options of every connection](connection.md#options) and of [every room](connection.md#room-options).
+
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | apiUrl | `string` | | **Required.** The worker's API URL, such as `https://api.mazupo.com/cloudflare`. The room gets its access token from `POST <apiUrl>/token`. |
@@ -19,121 +23,41 @@ room.connect();
 | roomId | `string` | | **Required.** The room to watch. Devices join rooms with `--cloudflare-room`. |
 | viewerId | `string` | random UUID | Who you are in the room, such as `Richard Tai`: 1 to 64 letters (any language), digits, spaces, `.`, `_` or `-`, with no space at either end. Others see it in the room and as the controller of a device. Connect again with the same id within 30 seconds to keep your streams and your control. |
 | ipc | `boolean` | `false` | Open each device's `_lossy` and `_reliable` channels, to get its messages and to control it. |
-| jitterBufferTarget | `number` | | How many milliseconds of media the receive buffer should hold (`0` to `4000`). See [setJitterBufferTarget](methods.md#setjitterbuffertarget). |
+| timeout | `number` | `0` | The room keeps trying until you call `disconnect()`. |
 
-## Events
+## Status
 
-### onDevices
+`connected` means that you are in the room. The devices' video comes after that, as each device wakes. If the connection drops, the room is `reconnecting` until it is back. It gets a new access token each time.
 
-`= (devices: RoomDevice[]) => {}`
+## Messages and control
 
-Called with the whole list of devices after every change: a device joins or leaves, changes state, gets a stream, or changes who controls it.
+Only the viewer that controls a device can send to it. Others wait in line.
 
-### onViewers
+- `sendText()` goes to every device that you control.
+- `sendTextTo(deviceId)` goes to that device, if you control it.
+- `canSend()` and `canSendTo(deviceId)` tell whether a message would get there now.
+- `gamepad()` goes to every device that you control, or only to `deviceIds`.
 
-`= (viewers: RoomViewerInfo[]) => {}`
-
-Called with everyone in the room, you included, after every change: a viewer joins, leaves, or loses its connection for a moment. See [RoomViewerInfo](#roomviewerinfo).
-
-### onMessage
-
-`= (deviceId: string, data: Uint8Array) => {}`
-
-Called when an IPC message arrives from a device. Needs `ipc: true`.
-
-### onStatus
-
-`= (status: RoomStatus) => {}`
-
-| Status | Meaning |
-| --- | --- |
-| `connecting` | Getting a token and joining. |
-| `joined` | In the room. |
-| `reconnecting` | The connection dropped. The room tries again. |
-| `closed` | After `leave()`, or after another tab joined with the same `viewerId`. |
-
-### onError
-
-`= (error: RoomError) => {}`
-
-Called with `{ code, message, deviceId? }`. The codes are the worker's error codes in lower case, such as `not_controller`, plus these two:
-
-- `token`: the token request failed, for example because of a wrong `apiKey`. The room tries again.
-- `replaced`: another connection joined with the same `viewerId`. The room stops and does not reconnect.
-
-## Methods
-
-### connect
-
-`.connect()`
-
-Joins the room. If the connection drops, the room reconnects by itself until you call `leave()`.
-
-### leave
-
-`.leave()`
-
-Leaves the room and closes the connection. When nobody else watches a device, it stops streaming.
+`onMessage(data, deviceId)` gets the messages of every device in the room. All of this needs `ipc: true`.
 
 ### takeControl
 
 `.takeControl(deviceId: string)`
 
-Takes control of the device if nobody controls it. If someone does, you wait in line. Needs `ipc: true`. If your channels to the device are not open yet, the room sends the request when they open.
+Takes control of the device, or waits in line. Needs `ipc: true`.
 
 ### releaseControl
 
 `.releaseControl(deviceId: string)`
 
-Gives up control of the device, or your place in line. The next viewer in line takes over.
+Gives up control or your place in line.
 
-### sendText
+## onError
 
-`.sendText(deviceId: string, text: string, mode?: 'reliable' | 'lossy'): boolean`
+Next to the [codes of every connection](connection.md#onerror), the codes are the worker's error codes in lower case, such as `not_controller`, plus these two:
 
-Sends text to the device's IPC socket. Returns `false` if you do not control the device or its channel is not open. `mode` is `'reliable'` by default.
-
-### sendData
-
-`.sendData(deviceId: string, data: Uint8Array, mode?: 'reliable' | 'lossy'): boolean`
-
-The same as `sendText`, for bytes. Data over 64 KiB must use `'reliable'`.
-
-### canSend
-
-`.canSend(deviceId: string, mode?: 'reliable' | 'lossy'): boolean`
-
-Whether a message sent now would reach the device.
-
-### ipcSink
-
-`.ipcSink(deviceId: string): IpcSink`
-
-One device as an `IpcSink`, for `attachGamepad()`. See [Gamepad](gamepad.md).
-
-### getStats
-
-`.getStats(selector?: MediaStreamTrack | null): Promise<RTCStatsReport> | undefined`
-
-The browser's stats for the room's connection. Returns `undefined` before the connection exists.
-
-### setJitterBufferTarget
-
-`.setJitterBufferTarget(target: number | null)`
-
-The same as [PiCamera's](methods.md#setjitterbuffertarget), for every track in the room.
-
-### devices
-
-`.devices: RoomDevice[]`
-
-The current list of devices, the same as the last `onDevices`.
-
-### viewers
-
-`.viewers: RoomViewerInfo[]`
-
-The current list of viewers, the same as the last `onViewers`.
+- `token`: the token request failed, for example because of a wrong `apiKey`. The room tries again.
+- `replaced`: another connection joined with the same `viewerId`. The room closes and does not reconnect.
 
 ## RoomDevice
 
@@ -148,6 +72,13 @@ The current list of viewers, the same as the last `onViewers`.
 | ipc | `boolean` | The device streams with `_lossy` and `_reliable`. |
 | control | `RoomControl` | Who controls the device. See below. |
 | canSend | `boolean` | You control the device and its `_reliable` channel is open. |
+
+Each `state`:
+
+- `offline`: the device is not connected to the worker.
+- `sleeping`: the device is connected, and nobody watches it.
+- `waking`: the device is starting to stream.
+- `live`: the device streams. Its `stream` comes soon after.
 
 `RoomControl`:
 

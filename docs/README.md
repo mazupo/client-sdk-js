@@ -6,19 +6,18 @@
 
 - [Getting Started](getting-started/README.md): install the SDK and show the first video.
 - [Guides](guides/README.md): snapshots, recording, IPC messages, gamepads, SFUs and more.
-- [API Reference](reference/README.md): every option, event and method.
-- [Migrating from 3.x](migrating-from-3x.md): Cloudflare moved to `CloudflareRoom`.
+- [API Reference](reference/README.md): every class, option, event and method.
+- [Migrating from 3.x](migrating-from-3x.md): `PiCamera` became `MqttCamera` and `LiveKitRoom`, and Cloudflare moved to `CloudflareRoom`.
 - [Migrating from 2.x](migrating-from-2x.md): renamed exports and the new wire protocol.
 
-## Signaling
+## Three ways to connect
 
-The `signaling` option selects how the SDK reaches the device:
+Use the class that matches how the device connects. All three are [connections](reference/connection.md): they share the same status, IPC, gamepad, microphone and speaker API.
 
-| `signaling` | Connects through | What works |
+| Class | Connects through | What works |
 | --- | --- | --- |
-| `mqtt` (default) | An MQTT broker | Peer-to-peer video, audio both ways, and every DataChannel |
-| `livekit` | A LiveKit SFU | Many viewers. Only the IPC channels. |
+| [`MqttCamera`](reference/mqtt-camera.md) | An MQTT broker, then peer to peer | One device. Video, audio both ways, IPC, snapshots, recording, files and camera controls. |
+| [`LiveKitRoom`](reference/livekit-room.md) | A LiveKit SFU | A room of devices for many viewers. IPC to the room or to one device. |
+| [`CloudflareRoom`](reference/cloudflare-room.md) | Cloudflare's SFU, through a cf-sfu-worker | A room of devices that stream only while someone watches. One viewer at a time controls each device. See [Cloudflare Realtime](guides/cloudflare.md). |
 
-To watch through Cloudflare Realtime, use `CloudflareRoom` instead of `PiCamera`. It shows every device in a room, and one viewer at a time can control each device. See [Cloudflare Realtime](guides/cloudflare.md).
-
-The device must run pi-webrtc 3.x. A 2.x device does not understand a 3.x client. See [Migrating from 2.x](migrating-from-2x.md).
+The device must run pi-webrtc 3.x or later. A 2.x device does not understand a 3.x or 4.x client. See [Migrating from 2.x](migrating-from-2x.md).
