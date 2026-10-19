@@ -51,7 +51,10 @@ export class CommanderPeer extends RtcPeer {
 
     if (!this.options.datachannelOnly) {
       console.debug("Create CommanderPeer with video/audio transceiver.");
-      this.createlocalAudioStream();
+      // Without a microphone the call still goes ahead, only without audio from this side.
+      this.createlocalAudioStream().catch((err) => {
+        console.warn("No microphone, so the device gets no audio from this viewer:", err);
+      });
       this.peer.addTransceiver("video", { direction: "recvonly" });
       this.peer.addTransceiver("audio", { direction: "sendrecv" });
     }
