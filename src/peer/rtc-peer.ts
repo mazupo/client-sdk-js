@@ -1,12 +1,6 @@
-import { PiCameraOptions } from "../pi-camera.types";
-import { Packet, QueryFileResponse, RecordingResponse, Request } from "../proto/packet";
-import { StreamAssembler, StreamResult } from "../rtc/datachannel-receiver";
-import {
-  arrayBufferToBase64,
-  clampJitterBufferTarget,
-  generateRequestId,
-  yieldToEventLoop
-} from "../utils/rtc-tools";
+import { Packet, Request } from "../proto/packet";
+import { IpcReceiver } from "../rtc/ipc-receiver";
+import { clampJitterBufferTarget, CodecType, yieldToEventLoop } from "../utils/rtc-tools";
 
 export type ChannelLabel = 'command' | 'stream' | '_lossy' | '_reliable';
 
@@ -131,23 +125,30 @@ export function ipcBody(binary: Uint8Array, options?: IpcOptions) {
     : { raw: binary };
 }
 
+/** What a peer reads from its connection's options. */
+export interface PeerOptions {
+  isMicOn?: boolean;
+  isSpeakerOn?: boolean;
+  jitterBufferTarget?: number | null;
+  /** MQTT only: just the data channels, no audio or video. */
+  datachannelOnly?: boolean;
+  /** MQTT only: the video codec to ask the device for. */
+  codec?: CodecType;
+}
+
 export interface RtcPeerConfig extends RTCConfiguration {
-  options: PiCameraOptions;
+  options: PeerOptions;
 }
 
-interface PendingRequest {
-  type: RequestType;
-  createdAt: number;
-}
-
+/**
+ * One RTCPeerConnection, for every backend: the received streams, the microphone and speaker,
+ * the jitter buffer, and the IPC channels. Subclasses add what only their backend has.
+ */
 export class RtcPeer {
-  onSnapshot?: (base64: string) => void;
-  onVideoListLoaded?: (res: QueryFileResponse) => void;
-  onProgress?: (received: number, total: number, type: RequestType, requestId?: string) => void;
-  onVideoDownloaded?: (file: Uint8Array) => void;
   onDatachannel?: (role: ChannelRole) => void;
-  onMessage?: (data: Uint8Array) => void;
-  onRecording?: (res: RecordingResponse) => void;
+  /** An IPC message. `from` names the sender where the backend says who it was. */
+  onMessage?: (data: Uint8Array, from?: string) => void;
+  onProgress?: (received: number, total: number, type: RequestType, requestId?: string) => void;
   onStream?: (stream: MediaStream) => void;
   onSfuStream?: (sid: string, stream: MediaStream) => void;
   onIceCandidate?: ((ev: RTCPeerConnectionIceEvent) => any);
@@ -156,20 +157,16 @@ export class RtcPeer {
   onAnswer?: ((answer: RTCSessionDescriptionInit) => any);
   onReconnectFailed?: (() => any);
 
-  readonly options: PiCameraOptions;
+  readonly options: PeerOptions;
   protected peer: RTCPeerConnection;
   protected channels: Partial<Record<ChannelRole, RTCDataChannel>> = {};
   private localStream?: MediaStream;
   private remoteStreamMap: Map<string, MediaStream> = new Map();
   private pendingIceCandidates: RTCIceCandidateInit[] = [];
-  private assemblers: Partial<Record<ChannelRole, StreamAssembler>> = {};
+  private ipcReceivers: Partial<Record<ChannelRole, IpcReceiver>> = {};
   private messageQueue: Array<{ role: ChannelRole; buffer: ArrayBuffer }> = [];
   private messageQueueHead = 0;
   private isProcessingQueue = false;
-
-  private pendingRequests: Map<string, PendingRequest> = new Map();
-  private readonly MAX_PENDING_REQUESTS = 256;
-  private readonly PENDING_REQUEST_TTL_MS = 5 * 60 * 1000;
 
   private readonly MAX_ICE_RESTART_ATTEMPTS = 3;
   private readonly DISCONNECT_RESTART_DELAY_MS = 3000;
@@ -200,6 +197,9 @@ export class RtcPeer {
     this.peer.onconnectionstatechange = () => {
       const state = this.peer.connectionState;
       this.onConnectionStateChange?.(state);
+      if (!this.restartsIce()) {
+        return;
+      }
 
       if (state === "connected") {
         this.clearDisconnectTimer();
@@ -233,26 +233,7 @@ export class RtcPeer {
       this.adoptChannel(role, channel);
     }
 
-    this.peer.onnegotiationneeded = async () => {
-      try {
-        if (!this.negotiationReady) {
-          console.debug("onnegotiationneeded: skipped before initial offer is sent");
-          return;
-        }
-
-        if (this.peer.signalingState !== "stable") {
-          console.debug("signaling state is not `stable`:", this.peer.signalingState);
-          return;
-        }
-
-        console.debug("onnegotiationneeded: creating offer");
-        this.createOffer();
-
-      } catch (err) {
-        console.error("Error during negotiationneeded:", err);
-      }
-    };
-
+    this.peer.onnegotiationneeded = () => this.onNegotiationNeeded();
   }
 
   get connectionState() {
@@ -264,10 +245,10 @@ export class RtcPeer {
   }
 
   close() {
-    for (const key of Object.keys(this.assemblers)) {
-      this.assemblers[Number(key) as ChannelRole]?.reset();
+    for (const key of Object.keys(this.ipcReceivers)) {
+      this.ipcReceivers[Number(key) as ChannelRole]?.reset();
     }
-    this.assemblers = {};
+    this.ipcReceivers = {};
 
     for (const key of Object.keys(this.channels)) {
       const channel = this.channels[Number(key) as ChannelRole];
@@ -278,7 +259,6 @@ export class RtcPeer {
       }
     }
     this.channels = {};
-    this.pendingRequests.clear();
 
     this.localStream?.getTracks().forEach(track => {
       track.stop();
@@ -297,6 +277,7 @@ export class RtcPeer {
     this.peer.onicecandidate = null;
     this.peer.onconnectionstatechange = null;
     this.peer.ondatachannel = null;
+    this.peer.onnegotiationneeded = null;
 
     this.clearDisconnectTimer();
     this.clearIceRestartTimer();
@@ -304,13 +285,10 @@ export class RtcPeer {
     this.reconnectFailed = false;
     this.negotiationReady = false;
 
-    this.onSnapshot = undefined;
-    this.onVideoListLoaded = undefined;
     this.onProgress = undefined;
-    this.onVideoDownloaded = undefined;
     this.onMessage = undefined;
-    this.onRecording = undefined;
     this.onStream = undefined;
+    this.onSfuStream = undefined;
     this.onIceCandidate = undefined;
     this.onConnectionStateChange = undefined;
     this.onReconnectFailed = undefined;
@@ -319,6 +297,34 @@ export class RtcPeer {
     this.messageQueueHead = 0;
     this.isProcessingQueue = false;
     console.debug("webrtc peer is closed.");
+  }
+
+  /**
+   * Whether this peer restarts ICE on its own when the connection drops. A peer whose backend
+   * starts over with a new session instead says no, and watches `onConnectionStateChange`.
+   */
+  protected restartsIce(): boolean {
+    return true;
+  }
+
+  /** Offers again when tracks or channels change, once the first offer is out. */
+  protected onNegotiationNeeded(): void {
+    try {
+      if (!this.negotiationReady) {
+        console.debug("onnegotiationneeded: skipped before initial offer is sent");
+        return;
+      }
+
+      if (this.peer.signalingState !== "stable") {
+        console.debug("signaling state is not `stable`:", this.peer.signalingState);
+        return;
+      }
+
+      console.debug("onnegotiationneeded: creating offer");
+      this.createOffer();
+    } catch (err) {
+      console.error("Error during negotiationneeded:", err);
+    }
   }
 
   /** Open an out-of-band channel. Both sides create it locally on the same id. */
@@ -383,91 +389,8 @@ export class RtcPeer {
     return true;
   }
 
-  /**
-   * Record an outgoing request so its answer can be recognised. Nothing on a stream says what its
-   * body is, so this map is what decides how a completed body is parsed.
-   */
-  protected trackRequest(type: RequestType): string {
-    this.prunePendingRequests();
-    const requestId = generateRequestId();
-    this.pendingRequests.set(requestId, { type, createdAt: Date.now() });
-    return requestId;
-  }
-
-  protected retireRequest(requestId: string): RequestType | undefined {
-    if (!requestId) {
-      return undefined;
-    }
-    const pending = this.pendingRequests.get(requestId);
-    this.pendingRequests.delete(requestId);
-    return pending?.type;
-  }
-
-  /** Answers that never arrive would otherwise sit here for the life of the connection. */
-  private prunePendingRequests(): void {
-    const cutoff = Date.now() - this.PENDING_REQUEST_TTL_MS;
-    for (const [id, request] of this.pendingRequests) {
-      if (request.createdAt < cutoff) {
-        this.pendingRequests.delete(id);
-      }
-    }
-    while (this.pendingRequests.size >= this.MAX_PENDING_REQUESTS) {
-      const oldest = this.pendingRequests.keys().next();
-      if (oldest.done) {
-        break;
-      }
-      this.pendingRequests.delete(oldest.value);
-    }
-  }
-
-  /** Apply codec preferences to every video transceiver before each description. */
+  /** Before each description. The MQTT peer picks its codec here. */
   protected prepareNegotiation(): void {
-    this.peer.getTransceivers()
-      .filter((transceiver) =>
-        transceiver.receiver.track?.kind === "video" && transceiver.currentDirection !== "stopped")
-      .forEach((transceiver) => this.preferCodec(transceiver));
-  }
-
-  private isCodec(entry: { mimeType: string }, name: string): boolean {
-    return entry.mimeType.split("/")[1]?.toUpperCase() === name.toUpperCase();
-  }
-
-  /** Restrict the video m-line to the selected codec before generating the description. */
-  private preferCodec(transceiver: RTCRtpTransceiver): void {
-    const codec = this.options.codec;
-    if (!codec) {
-      return;
-    }
-
-    const capabilities = RTCRtpReceiver.getCapabilities("video");
-    if (!capabilities) {
-      console.warn("Cannot read video capabilities; leaving the codec preference alone.");
-      return;
-    }
-
-    // Keep RTX, RED, and ULPFEC alongside the selected codec.
-    const wanted = capabilities.codecs.filter((entry) =>
-      this.isCodec(entry, codec) || this.isCodec(entry, "RTX")
-      || this.isCodec(entry, "RED") || this.isCodec(entry, "ULPFEC"));
-
-    if (!wanted.some((entry) => this.isCodec(entry, codec))) {
-      console.warn(`This browser cannot receive ${codec}; leaving the codec preference alone.`);
-      return;
-    }
-
-    // Don't select a codec the remote isn't sending.
-    const offered = transceiver.receiver.getParameters?.()?.codecs ?? [];
-    if (offered.length > 0 && !offered.some((entry) => this.isCodec(entry, codec))) {
-      console.debug(`The remote is not sending ${codec} here; leaving the codec preference alone.`);
-      return;
-    }
-
-    try {
-      transceiver.setCodecPreferences(wanted);
-    } catch (err) {
-      // Never let a codec preference take the whole negotiation down with it.
-      console.warn("Failed to set the codec preference:", err);
-    }
   }
 
   createOffer = async (options?: RTCOfferOptions) => {
@@ -529,7 +452,7 @@ export class RtcPeer {
     this.peer.getReceivers().forEach((receiver) => this.applyJitterBufferTarget(receiver));
   }
 
-  private applyJitterBufferTarget(receiver: RTCRtpReceiver): void {
+  protected applyJitterBufferTarget(receiver: RTCRtpReceiver): void {
     if (this.jitterBufferTarget === undefined) {
       return;
     }
@@ -548,19 +471,18 @@ export class RtcPeer {
 
   toggleMic = (enabled: boolean = !this.options.isMicOn) => {
     this.options.isMicOn = enabled;
-    this.toggleTrack(enabled, this.localStream);
-  };
-
-  toggleSpeaker = (enabled: boolean = !this.options.isSpeakerOn) => {
-    this.options.isSpeakerOn = enabled;
-    this.remoteStreamMap.forEach((remoteStream) => {
-      this.toggleTrack(enabled, remoteStream);
+    this.localStream?.getAudioTracks().forEach((track) => {
+      track.enabled = enabled;
     });
   };
 
-  private toggleTrack = (isOn: boolean, stream?: MediaStream) => {
-    stream?.getAudioTracks().forEach((track) => {
-      track.enabled = isOn;
+  /** Every audio track received, however the backend groups them into streams. */
+  toggleSpeaker = (enabled: boolean = !this.options.isSpeakerOn) => {
+    this.options.isSpeakerOn = enabled;
+    this.peer.getReceivers().forEach((receiver) => {
+      if (receiver.track?.kind === "audio") {
+        receiver.track.enabled = enabled;
+      }
     });
   };
 
@@ -619,7 +541,7 @@ export class RtcPeer {
     return event.streams[0]?.id ?? event.transceiver.mid ?? event.track.id;
   }
 
-  private handleTrack = (event: RTCTrackEvent) => {
+  protected handleTrack(event: RTCTrackEvent): void {
     this.applyJitterBufferTarget(event.receiver);
 
     const sid = this.getStreamKey(event);
@@ -653,70 +575,16 @@ export class RtcPeer {
     this.onSfuStream?.(sid, remoteStream);
   }
 
-  /** Only roles carrying chunked bodies get an assembler; `command` responses are read inline. */
+  /** The IPC channels get a receiver. The MQTT peer adds its own for `stream`. */
   protected createReceivers(role: ChannelRole): void {
-    if (role === ChannelRole.Command) {
+    if (role !== ChannelRole.Lossy && role !== ChannelRole.Reliable) {
       return;
     }
-
-    const isIpc = role === ChannelRole.Lossy || role === ChannelRole.Reliable;
-
-    this.assemblers[role] = new StreamAssembler({
-      onProgress: (received, total, requestId) => {
-        const type = isIpc ? RequestType.Ipc : this.pendingRequests.get(requestId)?.type;
-        if (type !== undefined) {
-          this.onProgress?.(received, total, type, requestId || undefined);
-        }
-      },
-      onComplete: (result) => this.handleStreamComplete(role, result),
-      onAbort: (_streamId, _reason, requestId) => this.retireRequest(requestId),
-    });
-  };
-
-  /**
-   * Route a reassembled body by the request it answers, falling back to the device's mime type
-   * hint if that request has already been retired.
-   */
-  private handleStreamComplete(role: ChannelRole, result: StreamResult): void {
-    if (role === ChannelRole.Lossy || role === ChannelRole.Reliable) {
-      this.onMessage?.(result.body);
-      return;
-    }
-
-    const type = this.retireRequest(result.requestId) ?? this.typeFromMimeType(result.mimeType);
-
-    switch (type) {
-      case RequestType.TakeSnapshot: {
-        const mime = result.mimeType || "image/jpeg";
-        this.onSnapshot?.(`data:${mime};base64,` + arrayBufferToBase64(result.body));
-        break;
-      }
-      case RequestType.QueryFile:
-        this.onVideoListLoaded?.(QueryFileResponse.decode(result.body));
-        break;
-      case RequestType.TransferFile:
-        this.onVideoDownloaded?.(result.body);
-        break;
-      default:
-        console.warn(
-          `Stream ${result.streamId} answers an unknown request ` +
-          `(request_id "${result.requestId}", mime "${result.mimeType}"); dropping ${result.body.length} bytes.`
-        );
-    }
-  }
-
-  /** Last resort when a stream outlives its pending entry. */
-  private typeFromMimeType(mimeType: string): RequestType | undefined {
-    switch (mimeType) {
-      case "image/jpeg":
-        return RequestType.TakeSnapshot;
-      case "application/x-protobuf":
-        return RequestType.QueryFile;
-      case "application/octet-stream":
-        return RequestType.TransferFile;
-      default:
-        return undefined;
-    }
+    this.ipcReceivers[role]?.reset();
+    this.ipcReceivers[role] = new IpcReceiver(
+      (body) => this.onMessage?.(body),
+      (received, total, requestId) => this.onProgress?.(received, total, RequestType.Ipc, requestId || undefined),
+    );
   }
 
   protected onDataChannelMessage(role: ChannelRole, event: MessageEvent): void {
@@ -754,40 +622,6 @@ export class RtcPeer {
   }
 
   protected dispatchPayload(role: ChannelRole, data: Uint8Array) {
-    const packet = Packet.decode(data);
-
-    switch (role) {
-      case ChannelRole.Command:
-        this.dispatchResponse(packet);
-        return;
-
-      case ChannelRole.Stream:
-        this.assemblers[role]?.receive(packet);
-        return;
-
-      case ChannelRole.Lossy:
-      case ChannelRole.Reliable:
-        // A raw body fitted in one message; a larger one arrives as a stream on this channel.
-        if (packet.raw !== undefined) {
-          this.onMessage?.(packet.raw);
-        } else {
-          this.assemblers[role]?.receive(packet);
-        }
-        return;
-    }
-  }
-
-  private dispatchResponse(packet: Packet): void {
-    this.retireRequest(packet.requestId);
-
-    const response = packet.response;
-    if (!response) {
-      console.debug("Ignoring a non-response packet on the command channel.");
-      return;
-    }
-
-    if (response.recording) {
-      this.onRecording?.(response.recording);
-    }
+    this.ipcReceivers[role]?.receive(Packet.decode(data));
   }
 }

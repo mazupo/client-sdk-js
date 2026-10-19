@@ -15,8 +15,9 @@ import {
   ViewerRef,
 } from '../proto/cloudflare';
 import { Packet } from '../proto/packet';
+import { CloudflarePeer } from '../peer/cloudflare-peer';
 import { ChannelRole, IpcMode, IpcOptions, IpcSink, roleInit } from '../peer/rtc-peer';
-import { StreamAssembler } from '../rtc/datachannel-receiver';
+import { IpcReceiver } from '../rtc/ipc-receiver';
 import { sendIpc } from '../rtc/ipc-sender';
 import { clampJitterBufferTarget, generateRequestId } from '../utils/rtc-tools';
 import {
@@ -73,7 +74,7 @@ interface DataChannels {
   ids: string;
   canReply: boolean;
   channels: Map<string, RTCDataChannel>;
-  assemblers: StreamAssembler[];
+  receivers: IpcReceiver[];
 }
 
 function backoff(attempt: number): number {
@@ -129,7 +130,7 @@ export class CloudflareRoom {
   private syncTimer?: Timer;
   private rebuildTimer?: Timer;
   private connectCheck?: Timer;
-  private pc: RTCPeerConnection | null = null;
+  private peer: CloudflarePeer | null = null;
   private iceServers: RTCIceServer[] = [];
   private leaving = true;
   private attempt = 0;
@@ -281,13 +282,13 @@ export class CloudflareRoom {
 
   /** The browser's stats for the room's PeerConnection. Undefined before there is one. */
   getStats = (selector?: MediaStreamTrack | null): Promise<RTCStatsReport> | undefined => {
-    return this.pc?.getStats(selector);
+    return this.peer?.getStats(selector);
   }
 
   /** Same as PiCamera's: retunes the jitter buffer of every track received. */
   setJitterBufferTarget = (target: number | null) => {
     this.jitterBufferTarget = clampJitterBufferTarget(target);
-    this.pc?.getReceivers().forEach((receiver) => this.applyJitterBufferTarget(receiver));
+    this.peer?.setJitterBufferTarget(target);
   }
 
   getJitterBufferTarget = (): number | null | undefined => {
@@ -446,7 +447,7 @@ export class CloudflareRoom {
         this.iceServers = message.iceServers.map(rtcIceServer);
         this.me = { room: message.room, viewerId: message.viewerId };
         // An answer to an offer sent on the old socket is lost. Without it, start over.
-        if (!message.resumed || !this.pc || this.ownOffers > 0) {
+        if (!message.resumed || !this.peer || this.ownOffers > 0) {
           this.ownOffers = 0;
           this.resetPeer(true);
           void this.connectEarly();
@@ -506,13 +507,13 @@ export class CloudflareRoom {
       case 'answer': {
         this.ownOffers = Math.max(0, this.ownOffers - 1);
         // The answer to an offer from a PeerConnection we have replaced since.
-        const peer = this.pc;
+        const peer = this.peer;
         if (this.ownOffers > 0 || !peer) {
           break;
         }
         this.offerFailures = 0;
         try {
-          await peer.setRemoteDescription({ type: 'answer', sdp: frame.message.sdp });
+          await peer.applyAnswer(frame.message.sdp);
         } catch (err) {
           console.warn('CloudflareRoom: the SFU answer did not apply, starting over =>', err);
           this.rebuildPeer();
@@ -622,16 +623,13 @@ export class CloudflareRoom {
       this.resetPeer(true);
       this.offerDue = true;
     }
-    const peer = this.pc;
+    const peer = this.peer;
     if (!peer) {
       return;
     }
     this.setSubscriptions(message.tracks);
     try {
-      await peer.setRemoteDescription({ type: 'offer', sdp: message.sdp });
-      const answer = await peer.createAnswer();
-      await peer.setLocalDescription(answer);
-      sendRequest(this.socket, 'answer', { sdp: answer.sdp ?? '' });
+      sendRequest(this.socket, 'answer', { sdp: await peer.answer(message.sdp) });
     } catch (err) {
       console.warn('CloudflareRoom: the SFU offer did not apply, starting over =>', err);
       this.rebuildPeer();
@@ -646,24 +644,25 @@ export class CloudflareRoom {
    * the devices wake, and tracks come later with the SFU's offers. Data channels need it too.
    */
   private async connectEarly(): Promise<void> {
-    const peer = this.pc;
+    const peer = this.peer;
     if (!peer) {
       return;
     }
     this.ownOffers += 1;
+    let sdp: string;
     try {
-      peer.createDataChannel('server-events', { negotiated: true, id: 0 });
-      await peer.setLocalDescription(await peer.createOffer());
+      peer.openChannel('server-events', 0);
+      sdp = await peer.offer();
     } catch (err) {
       this.ownOffers = Math.max(0, this.ownOffers - 1);
       console.warn('CloudflareRoom: could not create an offer =>', err);
       return;
     }
-    if (peer !== this.pc || this.socket?.readyState !== WebSocket.OPEN) {
+    if (peer !== this.peer || this.socket?.readyState !== WebSocket.OPEN) {
       this.ownOffers = Math.max(0, this.ownOffers - 1); // replaced or disconnected meanwhile: not sent
       return;
     }
-    sendRequest(this.socket, 'offer', { sdp: peer.localDescription?.sdp ?? '' });
+    sendRequest(this.socket, 'offer', { sdp });
   }
 
   /**
@@ -672,13 +671,13 @@ export class CloudflareRoom {
    * it a few seconds, then start over.
    */
   private checkConnects() {
-    if (this.connectCheck || !this.pc || this.pc.connectionState === 'connected') {
+    if (this.connectCheck || !this.peer || this.peer.connectionState === 'connected') {
       return;
     }
-    const peer = this.pc;
+    const peer = this.peer;
     this.connectCheck = setTimeout(() => {
       this.connectCheck = undefined;
-      if (peer === this.pc && this.ownOffers === 0 && peer.connectionState !== 'connected') {
+      if (peer === this.peer && this.ownOffers === 0 && peer.connectionState !== 'connected') {
         this.rebuildPeer();
       }
     }, CONNECT_GRACE_MS);
@@ -716,7 +715,7 @@ export class CloudflareRoom {
   private sync() {
     // The SFU holds a subscribe until the PeerConnection is connected, and the worker answers our
     // requests one at a time. So wait: a request stuck there would hold up a new offer.
-    if (this.busy || this.ownOffers > 0 || this.pc?.connectionState !== 'connected' || this.socket?.readyState !== WebSocket.OPEN) {
+    if (this.busy || this.ownOffers > 0 || this.peer?.connectionState !== 'connected' || this.socket?.readyState !== WebSocket.OPEN) {
       return;
     }
 
@@ -813,10 +812,10 @@ export class CloudflareRoom {
         current = undefined;
       }
       if (!current) {
-        if (!this.pc) {
+        if (!this.peer) {
           continue;
         }
-        current = { generation: entry.generation, ids, canReply: false, channels: new Map(), assemblers: [] };
+        current = { generation: entry.generation, ids, canReply: false, channels: new Map(), receivers: [] };
         for (const spec of entry.channels) {
           current.channels.set(spec.label, this.openChannel(entry.deviceId, spec.label, spec.id, current));
         }
@@ -838,22 +837,12 @@ export class CloudflareRoom {
 
   /** A device's channel, negotiated on the id the worker gave. */
   private openChannel(deviceId: string, label: string, id: number, owner: DataChannels): RTCDataChannel {
-    const channel = this.pc!.createDataChannel(label, { negotiated: true, id, ...CHANNEL_INIT[label] });
-    channel.binaryType = 'arraybuffer';
-    // A body over 64 KiB arrives as a Stream of chunks on the same channel.
-    const assembler = new StreamAssembler({
-      onComplete: (result) => this.onMessage?.(deviceId, result.body),
-    });
-    owner.assemblers.push(assembler);
+    const channel = this.peer!.openChannel(label, id, CHANNEL_INIT[label]);
+    const receiver = new IpcReceiver((body) => this.onMessage?.(deviceId, body));
+    owner.receivers.push(receiver);
     channel.addEventListener('message', (event) => {
       try {
-        const packet = Packet.decode(new Uint8Array(event.data as ArrayBuffer));
-        const body = packet.raw ?? packet.ipc?.payload;
-        if (body !== undefined) {
-          this.onMessage?.(deviceId, body);
-        } else {
-          assembler.receive(packet);
-        }
+        receiver.receive(Packet.decode(new Uint8Array(event.data as ArrayBuffer)));
       } catch (err) {
         console.warn(`CloudflareRoom: an unreadable message from ${deviceId} =>`, err);
       }
@@ -874,8 +863,8 @@ export class CloudflareRoom {
     for (const channel of current?.channels.values() ?? []) {
       channel.close();
     }
-    for (const assembler of current?.assemblers ?? []) {
-      assembler.reset();
+    for (const receiver of current?.receivers ?? []) {
+      receiver.reset();
     }
     if (current) {
       this.changed();
@@ -905,8 +894,8 @@ export class CloudflareRoom {
     for (const deviceId of [...this.dataSubs.keys()]) {
       this.closeChannels(deviceId);
     }
-    this.pc?.close();
-    this.pc = null;
+    this.peer?.close();
+    this.peer = null;
     this.subscriptions.clear();
     if (this.streams.size > 0) {
       this.streams.clear();
@@ -915,34 +904,36 @@ export class CloudflareRoom {
     if (!create) {
       return;
     }
-    const peer = new RTCPeerConnection({ iceServers: this.iceServers, bundlePolicy: 'max-bundle' });
-    this.pc = peer;
-    peer.addEventListener('track', (event) => {
-      if (peer !== this.pc) {
-        return;
-      }
-      this.applyJitterBufferTarget(event.receiver);
-      this.attachTracks();
+    const peer = new CloudflarePeer({
+      iceServers: this.iceServers,
+      bundlePolicy: 'max-bundle',
+      options: { isSpeakerOn: true, jitterBufferTarget: this.jitterBufferTarget },
     });
-    peer.addEventListener('connectionstatechange', () => {
-      if (peer !== this.pc) {
+    this.peer = peer;
+    peer.onTrack = () => {
+      if (peer === this.peer) {
+        this.attachTracks();
+      }
+    };
+    peer.onConnectionStateChange = (state) => {
+      if (peer !== this.peer) {
         return;
       }
-      console.debug(`CloudflareRoom: peer ${peer.connectionState}`);
-      if (peer.connectionState === 'connected') {
+      console.debug(`CloudflareRoom: peer ${state}`);
+      if (state === 'connected') {
         this.sync();
       }
       // ICE gave up. "disconnected" may still recover on its own; "failed" does not.
-      if (peer.connectionState === 'failed') {
+      if (state === 'failed') {
         this.rebuildPeer();
       }
-    });
+    };
   }
 
   /** Groups the received tracks by the device they came from, matched by mid. */
   private attachTracks() {
     const byDevice = new Map<string, MediaStreamTrack[]>();
-    for (const transceiver of this.pc?.getTransceivers() ?? []) {
+    for (const transceiver of this.peer?.transceivers() ?? []) {
       const sub = transceiver.mid ? this.subscriptions.get(transceiver.mid) : undefined;
       const track = transceiver.receiver.track;
       if (!sub || !track) {
@@ -969,17 +960,6 @@ export class CloudflareRoom {
     }
     if (changed) {
       this.changed();
-    }
-  }
-
-  private applyJitterBufferTarget(receiver: RTCRtpReceiver) {
-    if (this.jitterBufferTarget === undefined || !('jitterBufferTarget' in receiver)) {
-      return;
-    }
-    try {
-      receiver.jitterBufferTarget = this.jitterBufferTarget;
-    } catch (err) {
-      console.warn('Failed to apply jitterBufferTarget:', err);
     }
   }
 

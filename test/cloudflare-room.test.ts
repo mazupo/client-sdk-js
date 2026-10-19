@@ -226,6 +226,11 @@ class FakePeer extends Emitter {
   close() {
     this.connectionState = "closed";
   }
+  /** RtcPeer listens through the on* properties, so events go to both. */
+  override dispatch(type: string, event: any = {}) {
+    super.dispatch(type, event);
+    (this as any)[`on${type}`]?.(event);
+  }
   setState(state: RTCPeerConnectionState) {
     this.connectionState = state;
     this.dispatch("connectionstatechange");
@@ -233,8 +238,9 @@ class FakePeer extends Emitter {
   /** The SFU's offer added a track on this mid. */
   addTrack(mid: string, kind = "video") {
     const receiver = { track: new FakeTrack(`${kind}-${mid}`, kind) };
-    this.transceivers.push({ mid, receiver });
-    this.dispatch("track", { receiver });
+    const transceiver = { mid, receiver };
+    this.transceivers.push(transceiver);
+    this.dispatch("track", { receiver, track: receiver.track, transceiver, streams: [] });
   }
   channel(label: string) {
     return this.channels.filter((channel) => channel.label === label).at(-1);
