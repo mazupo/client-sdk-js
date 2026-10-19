@@ -54,6 +54,8 @@ Every connection takes these, next to its own options.
 | `reconnect_failed` | The connection dropped and did not come back. The connection closes. |
 | `signaling` | `MqttCamera`: the broker refused something, such as the topic subscription. |
 | `left` | `LiveKitRoom`: LiveKit ended the session. The connection closes. |
+| `microphone` | A room could not get the microphone, for example because the user said no. You can still listen. |
+| `microphone_limit` | `CloudflareRoom`: the room already has the most microphones. You can still listen. |
 | `token`, `replaced`, and the worker's codes | `CloudflareRoom`. See [onError there](cloudflare-room.md#onerror). |
 
 ### onStream
@@ -156,6 +158,9 @@ The target that you asked for, not the one the browser reached. `undefined` mean
 | --- | --- | --- | --- |
 | roomId | `string` | | **Required.** The room to join. |
 | viewerId | `string` | random UUID | Who you are in the room. |
+| microphone | `boolean` | `true` | Talk with the other viewers. The browser asks for the microphone when you connect, and you start muted: call `toggleMic()` to talk. `false` only listens. |
+
+Viewers in a room hear each other. Each viewer's voice is the `stream` of its entry in `viewers`. Play it in an `<audio>` element. `isMicOn` is `false` by default in a room.
 
 ### onDevices
 

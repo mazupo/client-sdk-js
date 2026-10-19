@@ -103,6 +103,36 @@ room.releaseControl('rudder');
 
 `device.control` tells who controls the device, who takes over next, and who waits. `control.mine` is `true` when you control it.
 
+## Talk with the other viewers
+
+Viewers in a room can talk to each other, and the room's devices play their voices. The browser asks for the microphone when you connect, and you start muted.
+
+```javascript
+const voices = document.getElementById('voices');
+
+room.onViewers = (viewers) => {
+  for (const viewer of viewers) {
+    if (viewer.me) continue;
+    let audio = document.getElementById(`voice-${viewer.viewerId}`);
+    if (!audio) {
+      audio = document.createElement('audio');
+      audio.id = `voice-${viewer.viewerId}`;
+      audio.autoplay = true;
+      voices.append(audio);
+    }
+    if (audio.srcObject !== (viewer.stream ?? null)) {
+      audio.srcObject = viewer.stream ?? null;
+    }
+  }
+};
+
+// A push-to-talk button.
+talkButton.onpointerdown = () => room.toggleMic(true);
+talkButton.onpointerup = () => room.toggleMic(false);
+```
+
+Each viewer has `microphone` and `muted`, so you can show who can talk and who is muted. `toggleSpeaker(false)` silences everyone. To only listen, pass `microphone: false`.
+
 ## Drive a device with a gamepad
 
 Take control of the device, then start the gamepad. It goes to every device that you control, or only to `deviceIds`:

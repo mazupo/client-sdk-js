@@ -44,6 +44,16 @@ A participant whose video arrives is a device. Everyone else is a viewer. A devi
 | sid | `string` | Its participant sid. Not set for you. |
 | state | `string` | As above. Not set for you. |
 | me | `boolean` | This is you. |
+| stream | `MediaStream` | Its voice, once it arrives. Never set for you. |
+
+## Voice
+
+With `microphone` (the default), you publish your microphone into the room, muted until `toggleMic()`. LiveKit sends you everyone else's. A viewer's voice is the `stream` of its `LiveKitViewer`.
+
+Two limits, because of the relay:
+
+- The others do not see when you mute.
+- A device plays the viewers' voices only when it runs with `--enable-ipc`. Then it also gets the other devices' video and audio.
 
 ## Messages
 

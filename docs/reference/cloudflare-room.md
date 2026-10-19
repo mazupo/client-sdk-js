@@ -23,7 +23,7 @@ Next to the [options of every connection](connection.md#options) and of [every r
 | roomId | `string` | | **Required.** The room to watch. Devices join rooms with `--cloudflare-room`. |
 | viewerId | `string` | random UUID | Who you are in the room, such as `Richard Tai`: 1 to 64 letters (any language), digits, spaces, `.`, `_` or `-`, with no space at either end. Others see it in the room and as the controller of a device. Connect again with the same id within 30 seconds to keep your streams and your control. |
 | ipc | `boolean` | `false` | Open each device's `_lossy` and `_reliable` channels, to get its messages and to control it. |
-| timeout | `number` | `0` | The room keeps trying until you call `disconnect()`. |
+| timeout | `number` | `0` | The room keeps trying until you call `disconnect()`, unless the worker refuses its token request. |
 
 ## Status
 
@@ -52,12 +52,24 @@ Takes control of the device, or waits in line. Needs `ipc: true`.
 
 Gives up control or your place in line.
 
+## Voice
+
+With `microphone` (the default), the room publishes your microphone and pulls every other viewer's. You start muted.
+
+- `toggleMic()` mutes or unmutes you. The others see it: `muted` in their `viewers`.
+- Each other viewer's voice is the `stream` of its `RoomViewerInfo`. Play it in an `<audio>` element.
+- `toggleSpeaker(false)` silences everyone, devices included.
+- The room's devices play your voice too, unless they run with `--no-audio`.
+- A room takes 10 microphones by default. Past that, `onError` gets `microphone_limit`, and you only listen.
+
 ## onError
 
-Next to the [codes of every connection](connection.md#onerror), the codes are the worker's error codes in lower case, such as `not_controller`, plus these two:
+Next to the [codes of every connection](connection.md#onerror), the codes are the worker's error codes in lower case, such as `not_controller`, plus these:
 
-- `token`: the token request failed, for example because of a wrong `apiKey`. The room tries again.
+- `token`: the token request failed. When the worker refused it, for example because of a wrong `apiKey`, the room closes. When the worker did not answer in 10 seconds, or answered with another error, the room tries again.
 - `replaced`: another connection joined with the same `viewerId`. The room closes and does not reconnect.
+- `microphone`: the browser did not give the microphone. You only listen.
+- `microphone_limit`: the room already has the most microphones. You only listen.
 
 ## RoomDevice
 
@@ -99,6 +111,9 @@ Each `state`:
 | ipc | `boolean` | The viewer joined with `ipc: true`, so it can control devices. |
 | away | `boolean` | The viewer's connection dropped. It can come back within 30 seconds. |
 | me | `boolean` | This is you. |
+| microphone | `boolean` | The viewer publishes its microphone. |
+| muted | `boolean` | Its microphone is muted. |
+| stream | `MediaStream` | Its voice, once it arrives. Never set for you. |
 
 To see what a viewer controls, look at `control` of each device.
 
