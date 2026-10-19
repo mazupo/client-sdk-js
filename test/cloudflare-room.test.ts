@@ -685,7 +685,7 @@ async function main() {
     check(lossy.readyState === "closed" && reliable.readyState === "closed", "channels closed on leave");
   }
 
-  console.log("[17] disconnect: tells the worker, closes everything, empties the list");
+  console.log("[17] disconnect: tells the worker, closes everything, empties the list; closing the page does not");
   {
     reset();
     let pagehide: (() => void) | undefined;
@@ -700,14 +700,12 @@ async function main() {
       }
     };
     const setup = await joinedRoom([device("cam", LIVE, 1)]);
-    pagehide?.();
-    check(setup.ws.requests("leave").length === 1, "pagehide sends leave");
+    check(pagehide === undefined, "no pagehide listener: a reload within 30 s resumes");
     setup.room.disconnect();
     await flush();
-    check(setup.ws.requests("leave").length === 2 && setup.ws.closedBy === 1000, "leave sent, socket closed");
+    check(setup.ws.requests("leave").length === 1 && setup.ws.closedBy === 1000, "leave sent, socket closed");
     check(setup.pc.connectionState === "closed", "PeerConnection closed");
     check(setup.statuses.at(-1) === "closed" && setup.devices().length === 0, "closed, no devices");
-    check(pagehide === undefined, "pagehide listener removed");
     delete (globalThis as any).addEventListener;
     delete (globalThis as any).removeEventListener;
   }

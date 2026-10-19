@@ -9,6 +9,8 @@ export class CloudflarePeer extends RtcPeer {
   /** A track arrived. The room maps it to a device by its mid. */
   onTrack?: (event: RTCTrackEvent) => void;
 
+  private microphone?: RTCRtpTransceiver;
+
   constructor(config: RtcPeerConfig) {
     super(config);
   }
@@ -56,5 +58,25 @@ export class CloudflarePeer extends RtcPeer {
 
   transceivers(): RTCRtpTransceiver[] {
     return this.peer.getTransceivers();
+  }
+
+  get signalingState(): RTCSignalingState {
+    return this.peer.signalingState;
+  }
+
+  /** Our own offer with the microphone added, sendonly. Returns it with the microphone's mid. */
+  async offerMicrophone(track: MediaStreamTrack, stream: MediaStream): Promise<{ sdp: string; mid: string }> {
+    this.microphone = this.peer.addTransceiver(track, { direction: "sendonly", streams: [stream] });
+    await this.peer.setLocalDescription(await this.peer.createOffer());
+    return { sdp: this.peer.localDescription?.sdp ?? "", mid: this.microphone.mid ?? "" };
+  }
+
+  /** Takes back a microphone offer the worker refused. */
+  async rollbackMicrophone(): Promise<void> {
+    if (this.peer.signalingState === "have-local-offer") {
+      await this.peer.setLocalDescription({ type: "rollback" });
+    }
+    this.microphone?.stop();
+    this.microphone = undefined;
   }
 }

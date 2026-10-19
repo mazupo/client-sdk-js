@@ -38,6 +38,9 @@ import {
   RoomViewerInfo,
 } from './types';
 
+/** The track name of a viewer's microphone, in the offer that publishes it. */
+const MICROPHONE_TRACK = 'microphone';
+
 const LIVE = DeviceState.DEVICE_STATE_LIVE;
 
 /** Refusals that will not change for the same publication. They are not asked for again. */
@@ -106,12 +109,34 @@ function rtcIceServer(server: IceServer): RTCIceServer {
  * viewer controls a device at a time; others wait in line. `sendText()` goes to every device this
  * viewer controls, `sendTextTo()` to one.
  *
+ * With `microphone` (the default), viewers talk to each other: this viewer publishes its
+ * microphone, muted until `toggleMic()`, and hears everyone else's. The room's devices play the
+ * voices too, unless they run with `--no-audio`.
+ *
  * After a dropped connection it reconnects on its own until `disconnect()`.
  */
 export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
   private readonly apiUrl: string;
   private readonly apiKey: string;
   private readonly ipc: boolean;
+  private readonly microphone: boolean;
+
+  /** The microphone, once the browser gave it. Kept across PeerConnections. */
+  private micStream?: MediaStream;
+  /** Counts requests for the microphone; `disconnect()` voids the one the browser still asks about. */
+  private micAsk = 0;
+  /** The browser is asking for the microphone. */
+  private micAsking = false;
+  /** The browser or the room refused it: this viewer only listens. */
+  private micBlocked = false;
+  /** Our microphone offer waits for its answer. */
+  private micPending = false;
+  /** Whether that offer said muted, to send a change made while it waited. */
+  private micOfferMuted = true;
+  /** The current PeerConnection publishes our microphone. */
+  private micPublished = false;
+  private micFailures = 0;
+  private micRetryAt = 0;
 
   /** The one socket in use. Events from any older socket are ignored. */
   private socket: WebSocket | null = null;
@@ -132,7 +157,7 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
   /** True from sending subscribe or unsubscribe until the worker answers. */
   private busy = false;
   /** What the request in flight asks for, so per-device errors go to the right retry list. */
-  private pending: 'tracks' | 'data' = 'tracks';
+  private pending: 'tracks' | 'data' | 'microphones' = 'tracks';
   private busyFailures = 0;
   /**
    * Our own offers without an answer yet. Only the answer to the last one applies, and
@@ -151,7 +176,11 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
   private readonly refused = new Map<string, { generation: number; code: ErrorCode }>();
   private readonly retries = new Map<string, Retry>();
   private readonly dataRetries = new Map<string, Retry>();
+  /** Other viewers' microphones that failed, by viewer id. */
+  private readonly micRetries = new Map<string, Retry>();
   private readonly streams = new Map<string, MediaStream>();
+  /** Other viewers' voices, by viewer id. */
+  private readonly viewerStreams = new Map<string, MediaStream>();
   /** takeControl() calls that wait for the device's channels to open. */
   private readonly pendingTakes = new Set<string>();
   private emitQueued = false;
@@ -164,6 +193,7 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
     this.apiUrl = options.apiUrl;
     this.apiKey = options.apiKey;
     this.ipc = options.ipc ?? false;
+    this.microphone = options.microphone ?? true;
   }
 
   /** The devices in the room, as `onDevices` last reported them. */
@@ -173,19 +203,36 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
 
   /** The viewers in the room, as `onViewers` last reported them. */
   get viewers(): RoomViewerInfo[] {
-    return this.viewerInfos.map((info) => ({
-      viewerId: info.viewerId,
-      ipc: info.dataChannels,
-      away: info.away,
-      me: info.viewerId === this.me?.viewerId,
-    }));
+    return this.viewerInfos.map((info) => {
+      const me = info.viewerId === this.me?.viewerId;
+      return {
+        viewerId: info.viewerId,
+        ipc: info.dataChannels,
+        away: info.away,
+        me,
+        microphone: info.microphone,
+        muted: info.muted,
+        stream: me ? undefined : this.viewerStreams.get(info.viewerId),
+      };
+    });
   }
 
   /** Joins the room. */
   protected open(): void {
     this.attempt = 0;
-    globalThis.addEventListener?.('pagehide', this.onPageHide);
     void this.join();
+    if (this.microphone && !this.micStream && !this.micBlocked && !this.micAsking) {
+      void this.getMicrophone();
+    }
+  }
+
+  /** Mutes or unmutes this viewer's microphone, and tells the room. */
+  override toggleMic(enabled: boolean = !this.isMicOn): void {
+    super.toggleMic(enabled);
+    this.micStream?.getAudioTracks().forEach((track) => (track.enabled = enabled));
+    if (this.micPublished) {
+      sendRequest(this.socket, 'mute', { muted: !enabled });
+    }
   }
 
   /** Leaves the room, so the device can sleep if nobody else watches. */
@@ -254,10 +301,6 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
       sameViewer(info?.controller, this.me) &&
       data.channels.get(`_${mode}`)?.readyState === 'open'
     );
-  }
-
-  private onPageHide = () => {
-    sendRequest(this.socket, 'leave');
   }
 
   private setViewers(viewers: ViewerInfo[]) {
@@ -358,9 +401,16 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
     this.refused.clear();
     this.retries.clear();
     this.dataRetries.clear();
+    this.micRetries.clear();
     this.pendingTakes.clear();
+    this.micStream?.getTracks().forEach((track) => track.stop());
+    this.micStream = undefined;
+    this.micAsk++;
+    this.micAsking = false;
+    this.micBlocked = false;
+    this.micFailures = 0;
+    this.micRetryAt = 0;
     this.me = null;
-    globalThis.removeEventListener?.('pagehide', this.onPageHide);
     this.changed();
     this.setViewers([]);
   }
@@ -455,6 +505,8 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
       }
       case 'viewers':
         this.setViewers(frame.message.viewers);
+        // Someone started or stopped publishing a microphone.
+        this.sync();
         break;
       case 'offer':
         await this.onOffer(frame.message);
@@ -474,6 +526,15 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
           this.rebuildPeer();
           break;
         }
+        if (this.micPending) {
+          this.micPending = false;
+          this.micPublished = true;
+          this.micFailures = 0;
+          // Muted or unmuted while the offer waited.
+          if (this.micOfferMuted !== !this.isMicOn) {
+            sendRequest(this.socket, 'mute', { muted: !this.isMicOn });
+          }
+        }
         this.sync();
         break;
       }
@@ -486,7 +547,11 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
         this.setSubscriptions(message.tracks);
         this.setData(message.data);
         for (const sub of message.tracks) {
-          this.retries.delete(sub.deviceId);
+          if (sub.viewerId) {
+            this.micRetries.delete(sub.viewerId);
+          } else {
+            this.retries.delete(sub.deviceId);
+          }
         }
         for (const sub of message.data) {
           this.dataRetries.delete(sub.deviceId);
@@ -516,6 +581,36 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
       this.ownOffers = 0;
       this.busy = false;
       this.scheduleReconnect();
+      return;
+    }
+
+    if (error.request === 'offer' && error.trackName === MICROPHONE_TRACK) {
+      this.ownOffers = Math.max(0, this.ownOffers - 1);
+      this.micPending = false;
+      const peer = this.peer;
+      void peer?.rollbackMicrophone().finally(() => {
+        if (peer === this.peer) {
+          this.sync();
+        }
+      });
+      if (error.code === ErrorCode.ERROR_CODE_MICROPHONE_LIMIT) {
+        this.micBlocked = true;
+        this.emitError({ code: 'microphone_limit', message: error.message });
+      } else {
+        // e.g. the SFU did not answer. Try again in a while.
+        this.micFailures++;
+        this.micRetryAt = Date.now() + Math.min(30_000, 1000 * 2 ** this.micFailures);
+        this.scheduleSync(this.micRetryAt - Date.now());
+      }
+      return;
+    }
+
+    if (error.viewerId && error.request === 'subscribe') {
+      // Usually the viewer stopped publishing meanwhile. Ask again in a moment if it still does.
+      const generation = this.viewerInfos.find((info) => info.viewerId === error.viewerId)?.microphoneGeneration ?? 0;
+      const previous = this.micRetries.get(error.viewerId);
+      const count = previous?.generation === generation ? previous.count + 1 : 0;
+      this.micRetries.set(error.viewerId, { generation, count, at: Date.now() + Math.min(10_000, 1000 * 2 ** count) });
       return;
     }
 
@@ -674,8 +769,13 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
       return;
     }
 
-    // Tracks from a publication that ended: the device slept, restarted or left.
+    // Tracks from a publication that ended: the device slept, restarted or left, or the viewer
+    // stopped publishing its microphone.
     const stale = [...this.subscriptions].filter(([, sub]) => {
+      if (sub.viewerId) {
+        const speaker = this.viewerInfos.find((info) => info.viewerId === sub.viewerId);
+        return !speaker?.microphone || speaker.microphoneGeneration !== sub.generation;
+      }
       const info = this.infos.get(sub.deviceId);
       return !info || info.state !== LIVE || info.generation !== sub.generation;
     });
@@ -737,12 +837,107 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
         return;
       }
     }
+
+    // The other viewers' voices, after the devices.
+    const wantedMics: string[] = [];
+    for (const info of this.viewerInfos) {
+      if (!info.microphone || info.viewerId === this.me?.viewerId) {
+        continue;
+      }
+      const has = [...this.subscriptions.values()].some(
+        (sub) => sub.viewerId === info.viewerId && sub.generation === info.microphoneGeneration,
+      );
+      const retry = this.micRetries.get(info.viewerId);
+      if (has) {
+        continue;
+      }
+      if (retry && retry.generation === info.microphoneGeneration && retry.at > now) {
+        nextRetry = Math.min(nextRetry, retry.at);
+        continue;
+      }
+      wantedMics.push(info.viewerId);
+    }
+    if (wantedMics.length > 0) {
+      this.send('microphones', 'subscribe', { microphones: wantedMics });
+      return;
+    }
+
+    // Our own microphone comes last: it waits for the browser and never holds up the picture.
+    if (this.micStream && !this.micBlocked && !this.micPending && !this.micPublished && this.peer?.signalingState === 'stable') {
+      if (this.micRetryAt <= now) {
+        void this.publishMicrophone();
+        return;
+      }
+      nextRetry = Math.min(nextRetry, this.micRetryAt);
+    }
     if (nextRetry !== Infinity) {
       this.scheduleSync(nextRetry - now);
     }
   }
 
-  private send(kind: 'tracks' | 'data', action: 'subscribe' | 'unsubscribe', message: DeepPartial<Subscribe> | DeepPartial<Unsubscribe>) {
+  /** Asks the browser for the microphone, muted until `toggleMic()`. Without it, the viewer only listens. */
+  private async getMicrophone(): Promise<void> {
+    const ask = ++this.micAsk;
+    this.micAsking = true;
+    let stream: MediaStream;
+    try {
+      if (!globalThis.navigator?.mediaDevices?.getUserMedia) {
+        throw new Error('this browser cannot capture audio');
+      }
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        video: false,
+      });
+    } catch (err) {
+      if (ask === this.micAsk) {
+        this.micAsking = false;
+        this.micBlocked = true;
+        this.emitError({ code: 'microphone', message: `No microphone, so you can only listen: ${err instanceof Error ? err.message : String(err)}` });
+      }
+      return;
+    }
+    if (ask !== this.micAsk) {
+      // disconnect() came while the browser asked: nothing else would stop these tracks.
+      stream.getTracks().forEach((track) => track.stop());
+      return;
+    }
+    this.micAsking = false;
+    stream.getAudioTracks().forEach((track) => (track.enabled = this.isMicOn));
+    this.micStream = stream;
+    this.sync();
+  }
+
+  /** Publishes the microphone on the current PeerConnection with our own offer. */
+  private async publishMicrophone(): Promise<void> {
+    const peer = this.peer;
+    const stream = this.micStream;
+    const track = stream?.getAudioTracks()[0];
+    if (!peer || !stream || !track) {
+      return;
+    }
+    this.micPending = true;
+    this.ownOffers += 1;
+    let offer: { sdp: string; mid: string };
+    try {
+      offer = await peer.offerMicrophone(track, stream);
+    } catch (err) {
+      this.ownOffers = Math.max(0, this.ownOffers - 1);
+      this.micPending = false;
+      console.warn('CloudflareRoom: could not offer the microphone =>', err);
+      return;
+    }
+    if (peer !== this.peer || this.socket?.readyState !== WebSocket.OPEN) {
+      this.ownOffers = Math.max(0, this.ownOffers - 1); // replaced or disconnected meanwhile: not sent
+      this.micPending = false;
+      return;
+    }
+    this.micOfferMuted = !this.isMicOn;
+    // Whether it starts muted goes first. The offer names only the microphone's m=audio.
+    sendRequest(this.socket, 'mute', { muted: this.micOfferMuted });
+    sendRequest(this.socket, 'offer', { sdp: offer.sdp, tracks: [{ trackName: MICROPHONE_TRACK, mid: offer.mid }] });
+  }
+
+  private send(kind: 'tracks' | 'data' | 'microphones', action: 'subscribe' | 'unsubscribe', message: DeepPartial<Subscribe> | DeepPartial<Unsubscribe>) {
     this.busy = true;
     this.pending = kind;
     sendRequest(this.socket, action, message);
@@ -852,9 +1047,15 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
     this.peer?.close();
     this.peer = null;
     this.subscriptions.clear();
+    this.micPending = false;
+    this.micPublished = false;
     if (this.streams.size > 0) {
       this.streams.clear();
       this.changed();
+    }
+    if (this.viewerStreams.size > 0) {
+      this.viewerStreams.clear();
+      this.onViewers?.(this.viewers);
     }
     if (!create) {
       return;
@@ -885,18 +1086,37 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
     };
   }
 
-  /** Groups the received tracks by the device they came from, matched by mid. */
+  /** Groups the received tracks by the device or viewer they came from, matched by mid. */
   private attachTracks() {
     const byDevice = new Map<string, MediaStreamTrack[]>();
+    const byViewer = new Map<string, MediaStreamTrack[]>();
     for (const transceiver of this.peer?.transceivers() ?? []) {
       const sub = transceiver.mid ? this.subscriptions.get(transceiver.mid) : undefined;
       const track = transceiver.receiver.track;
       if (!sub || !track) {
         continue;
       }
-      const tracks = byDevice.get(sub.deviceId) ?? [];
+      const [map, key] = sub.viewerId ? [byViewer, sub.viewerId] : [byDevice, sub.deviceId];
+      const tracks = map.get(key) ?? [];
       tracks.push(track);
-      byDevice.set(sub.deviceId, tracks);
+      map.set(key, tracks);
+    }
+    let voices = false;
+    for (const viewerId of new Set([...this.viewerStreams.keys(), ...byViewer.keys()])) {
+      const tracks = byViewer.get(viewerId) ?? [];
+      const current = this.viewerStreams.get(viewerId)?.getTracks() ?? [];
+      if (current.length === tracks.length && tracks.every((track) => current.includes(track))) {
+        continue;
+      }
+      voices = true;
+      if (tracks.length > 0) {
+        this.viewerStreams.set(viewerId, new MediaStream(tracks));
+      } else {
+        this.viewerStreams.delete(viewerId);
+      }
+    }
+    if (voices) {
+      this.onViewers?.(this.viewers);
     }
     let changed = false;
     for (const deviceId of new Set([...this.streams.keys(), ...byDevice.keys()])) {

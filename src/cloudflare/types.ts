@@ -38,6 +38,12 @@ export interface RoomViewerInfo {
   away: boolean;
   /** This viewer. */
   me: boolean;
+  /** It publishes its microphone. */
+  microphone: boolean;
+  /** Its microphone is muted. */
+  muted: boolean;
+  /** Its voice, once it arrives. Never set for this viewer. */
+  stream?: MediaStream;
 }
 
 export interface RoomControl {

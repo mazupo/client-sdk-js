@@ -36,4 +36,6 @@ export interface LiveKitViewer {
   sid?: string;
   state?: LiveKitParticipantState;
   me: boolean;
+  /** Its voice, once it arrives. Never set for this viewer. */
+  stream?: MediaStream;
 }

@@ -8,7 +8,9 @@ import { LiveKitDevice, LiveKitRoomOptions, LiveKitViewer } from './types';
 
 /**
  * A LiveKit room, through a relay. Devices publish into it; this viewer
- * subscribes to them and sends IPC over LiveKit's data channels.
+ * subscribes to them and sends IPC over LiveKit's data channels. With `microphone` (the
+ * default), viewers talk to each other: this viewer publishes its microphone, muted until
+ * `toggleMic()`, and LiveKit sends everyone else's.
  */
 export class LiveKitRoom extends SfuRoom<LiveKitDevice, LiveKitViewer> {
   /** The room's LiveKit sid and name. */
@@ -20,6 +22,7 @@ export class LiveKitRoom extends SfuRoom<LiveKitDevice, LiveKitViewer> {
 
   private readonly url: string;
   private readonly apiKey: string;
+  private readonly microphone: boolean;
   private client?: LiveKitClient;
   private publisher?: PublisherPeer;
   private subscriber?: SubscriberPeer;
@@ -30,12 +33,13 @@ export class LiveKitRoom extends SfuRoom<LiveKitDevice, LiveKitViewer> {
   private emitQueued = false;
 
   constructor(options: LiveKitRoomOptions) {
-    super(options, { timeout: DEFAULT.SIGNALING_TIMEOUT, isMicOn: true });
+    super(options, { timeout: DEFAULT.SIGNALING_TIMEOUT, isMicOn: false });
     if (!options.url || !options.apiKey) {
       throw new Error('LiveKitRoom needs url and apiKey.');
     }
     this.url = options.url;
     this.apiKey = options.apiKey;
+    this.microphone = options.microphone ?? true;
   }
 
   get devices(): LiveKitDevice[] {
@@ -53,7 +57,13 @@ export class LiveKitRoom extends SfuRoom<LiveKitDevice, LiveKitViewer> {
   get viewers(): LiveKitViewer[] {
     const others = [...this.participants.values()]
       .filter((participant) => !this.streams.get(participant.sid)?.getVideoTracks().length)
-      .map((participant): LiveKitViewer => ({ viewerId: participant.id, sid: participant.sid, state: participant.state, me: false }));
+      .map((participant): LiveKitViewer => ({
+        viewerId: participant.id,
+        sid: participant.sid,
+        state: participant.state,
+        me: false,
+        stream: this.streams.get(participant.sid),
+      }));
     return [{ viewerId: this.viewerId, me: true }, ...others];
   }
 
@@ -96,6 +106,24 @@ export class LiveKitRoom extends SfuRoom<LiveKitDevice, LiveKitViewer> {
       };
       subscriber.onReconnectFailed = () => this.giveUp();
 
+      // LiveKit takes a track only after addTrack, so the microphone is announced before the offer.
+      if (this.microphone) {
+        let announce = true;
+        try {
+          await publisher.createlocalAudioStream();
+        } catch (err) {
+          announce = false;
+          if (this.publisher === publisher) {
+            this.emitError({ code: 'microphone', message: `No microphone, so you can only listen: ${err instanceof Error ? err.message : String(err)}` });
+          }
+        }
+        if (this.publisher !== publisher) {
+          return; // disconnected while the browser asked for the microphone
+        }
+        if (announce) {
+          client.send('addAudioTrack', 'microphone');
+        }
+      }
       await publisher.createOffer();
     };
 

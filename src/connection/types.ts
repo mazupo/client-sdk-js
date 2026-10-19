@@ -40,6 +40,11 @@ export interface SfuRoomOptions extends ConnectionOptions {
   roomId: string;
   /** Who this viewer is in the room. A random UUID when omitted. */
   viewerId?: string;
+  /**
+   * Talk with the other viewers: publish this viewer's microphone, muted until `toggleMic()`.
+   * `true` by default; the browser asks for the microphone on `connect()`. `false` only listens.
+   */
+  microphone?: boolean;
 }
 
 /** Everything a gamepad sampler takes except where it sends, which is the connection. */

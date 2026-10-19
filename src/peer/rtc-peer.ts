@@ -405,7 +405,7 @@ export class RtcPeer {
   }
 
   createlocalAudioStream = async () => {
-    this.localStream = await navigator.mediaDevices.getUserMedia({
+    const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: true,
         noiseSuppression: true,
@@ -413,6 +413,12 @@ export class RtcPeer {
       },
       video: false,
     });
+    if (this.peer.signalingState === 'closed') {
+      // Closed while the browser asked: close() found no stream to stop, so stop it here.
+      stream.getTracks().forEach(track => track.stop());
+      throw new Error('The PeerConnection closed while the browser asked for the microphone.');
+    }
+    this.localStream = stream;
 
     this.localStream.getAudioTracks().forEach(track => {
       this.peer.addTrack(track, this.localStream!);
