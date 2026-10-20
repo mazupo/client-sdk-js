@@ -21,8 +21,9 @@ Next to the [options of every connection](connection.md#options) and of [every r
 | apiUrl | `string` | | **Required.** The worker's API URL, such as `https://api.mazupo.com/cloudflare`. The room gets its access token from `POST <apiUrl>/token`. |
 | apiKey | `string` | | **Required.** The worker's viewer public key. |
 | roomId | `string` | | **Required.** The room to watch. Devices join rooms with `--cloudflare-room`. |
-| viewerId | `string` | random UUID | Who you are in the room, such as `Richard Tai`: 1 to 64 letters (any language), digits, spaces, `.`, `_` or `-`, with no space at either end. Others see it in the room and as the controller of a device. Connect again with the same id within 30 seconds to keep your streams and your control. |
+| viewerId | `string` | random UUID | Your name in the room, such as `Richard Tai`: 1 to 64 letters (any language), digits, spaces, `.`, `_` or `-`. Reconnect with it within 30 seconds to keep your streams and control. |
 | ipc | `boolean` | `false` | Open each device's `_lossy` and `_reliable` channels, to get its messages and to control it. |
+| secret | `string` | random | 16 or more random characters, kept with `viewerId`. Only it can resume this viewer. By default the room keeps it in `sessionStorage`. Give it yourself in React Native. |
 | timeout | `number` | `0` | The room keeps trying until you call `disconnect()`, unless the worker refuses its token request. |
 
 ## Status
@@ -66,8 +67,9 @@ With `microphone` (the default), the room publishes your microphone and pulls ev
 
 Next to the [codes of every connection](connection.md#onerror), the codes are the worker's error codes in lower case, such as `not_controller`, plus these:
 
-- `token`: the token request failed. When the worker refused it, for example because of a wrong `apiKey`, the room closes. When the worker did not answer in 10 seconds, or answered with another error, the room tries again.
-- `replaced`: another connection joined with the same `viewerId`. The room closes and does not reconnect.
+- `token`: the token request failed. A refused request, such as a wrong `apiKey`, closes the room. Otherwise the room tries again.
+- `replaced`: a copy of this tab took over. The room closes.
+- `viewer_id_in_use`: someone else in the room uses this `viewerId`. The room closes.
 - `microphone`: the browser did not give the microphone. You only listen.
 - `microphone_limit`: the room already has the most microphones. You only listen.
 

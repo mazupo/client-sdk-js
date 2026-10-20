@@ -56,7 +56,7 @@ Every connection takes these, next to its own options.
 | `left` | `LiveKitRoom`: LiveKit ended the session. The connection closes. |
 | `microphone` | A room could not get the microphone, for example because the user said no. You can still listen. |
 | `microphone_limit` | `CloudflareRoom`: the room already has the most microphones. You can still listen. |
-| `token`, `replaced`, and the worker's codes | `CloudflareRoom`. See [onError there](cloudflare-room.md#onerror). |
+| `token`, `replaced`, `viewer_id_in_use`, and the worker's codes | `CloudflareRoom`. See [onError there](cloudflare-room.md#onerror). |
 
 ### onStream
 

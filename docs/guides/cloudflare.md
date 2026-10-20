@@ -163,7 +163,9 @@ const room = new CloudflareRoom({
 });
 ```
 
-Use one id per tab. When a second tab joins with the same id, the first tab stops: its `onError` gets the code `replaced`.
+Use one id per tab. The room keeps a secret for the id in `sessionStorage`. Another tab with the same id gets `viewer_id_in_use`.
+
+Without `sessionStorage`, as in React Native, also pass `secret`: a random string of 16 or more characters that you keep with the id.
 
 ## What the room does for you
 
