@@ -20,6 +20,7 @@ import { CloudflarePeer } from '../peer/cloudflare-peer';
 import { ChannelRole, IpcMode, IpcOptions, roleInit, RtcPeer } from '../peer/rtc-peer';
 import { IpcReceiver } from '../rtc/ipc-receiver';
 import { sendIpc } from '../rtc/ipc-sender';
+import { generateRequestId } from '../utils/rtc-tools';
 import {
   ResponseFrame,
   TokenError,
@@ -40,6 +41,8 @@ import {
 
 /** The track name of a viewer's microphone, in the offer that publishes it. */
 const MICROPHONE_TRACK = 'microphone';
+/** Where a tab keeps the secret of each viewer id, followed by the id. */
+const SECRET_KEY = '@mazupo/client:cloudflare-secret:';
 
 const LIVE = DeviceState.DEVICE_STATE_LIVE;
 
@@ -91,6 +94,25 @@ function viewer(ref: ViewerRef | undefined): RoomViewer | undefined {
   return ref ? { room: ref.room, viewerId: ref.viewerId } : undefined;
 }
 
+/**
+ * The secret this tab keeps for a viewer id the app chose. It stays in sessionStorage, so a reload
+ * with the same id resumes. Without sessionStorage it lasts as long as the room: give `secret`.
+ */
+function viewerSecret(viewerId: string): string {
+  const key = `${SECRET_KEY}${viewerId}`;
+  try {
+    const kept = globalThis.sessionStorage?.getItem(key);
+    if (kept) {
+      return kept;
+    }
+    const secret = generateRequestId();
+    globalThis.sessionStorage?.setItem(key, secret);
+    return secret;
+  } catch {
+    return generateRequestId(); // storage blocked
+  }
+}
+
 function rtcIceServer(server: IceServer): RTCIceServer {
   return {
     urls: server.urls,
@@ -120,6 +142,8 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
   private readonly apiKey: string;
   private readonly ipc: boolean;
   private readonly microphone: boolean;
+  /** Sent with each token request: only a connection with it can resume or replace this viewer. */
+  private readonly secret: string;
 
   /** The microphone, once the browser gave it. Kept across PeerConnections. */
   private micStream?: MediaStream;
@@ -194,6 +218,11 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
     this.apiKey = options.apiKey;
     this.ipc = options.ipc ?? false;
     this.microphone = options.microphone ?? true;
+    // A random id is not used again after a reload, so its secret is not kept either.
+    this.secret = options.secret ?? (options.viewerId?.trim() ? viewerSecret(this.viewerId) : generateRequestId());
+    if (this.secret.length < 16) {
+      throw new Error('CloudflareRoom needs a secret of at least 16 characters.');
+    }
   }
 
   /** The devices in the room, as `onDevices` last reported them. */
@@ -334,6 +363,7 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
         viewer_id: this.viewerId,
         room_id: this.roomId,
         can_subscribe: true,
+        secret: this.secret,
         ...(this.ipc ? { data_channels: true as const } : {}),
       });
       if (seq !== this.connectSeq || this.leaving) {
@@ -424,6 +454,12 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
     if (event.code === CloseCode.CLOSE_CODE_REPLACED) {
       this.shutDown(false);
       this.emitError({ code: 'replaced', message: 'Another connection joined the room with this viewer id.' });
+      this.closed();
+      return;
+    }
+    if (event.code === CloseCode.CLOSE_CODE_ID_IN_USE) {
+      this.shutDown(false);
+      this.emitError({ code: 'viewer_id_in_use', message: 'Someone else is in the room with this viewer id. Use another one, or connect again later.' });
       this.closed();
       return;
     }

@@ -14,6 +14,8 @@ export interface TokenBody {
   viewer_id: string;
   room_id: string;
   can_subscribe: true;
+  /** Only a connection with the same secret can resume or replace this viewer. */
+  secret: string;
   data_channels?: true;
 }
 

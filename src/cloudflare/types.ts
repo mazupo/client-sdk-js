@@ -19,6 +19,14 @@ export interface CloudflareRoomOptions extends SfuRoomOptions {
    * control of it to send. Fixed for the connection.
    */
   ipc?: boolean;
+
+  /**
+   * A random string of 16 or more characters that you keep with `viewerId`. Only a connection
+   * with it can resume this viewer or take its place. By default the room makes one, and keeps it
+   * in sessionStorage when you give `viewerId`, so a reload resumes. Give your own where there is
+   * no sessionStorage, as in React Native, to resume after the app comes back.
+   */
+  secret?: string;
 }
 
 export type DeviceStateName = 'offline' | 'sleeping' | 'waking' | 'live' | 'unknown';
