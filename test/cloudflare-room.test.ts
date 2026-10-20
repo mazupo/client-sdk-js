@@ -1034,6 +1034,66 @@ async function main() {
     check(cam?.state === "live" && cam?.generation === 2, "the list's info, not the one kept from before");
     setup.room.disconnect();
   }
+
+  console.log("[30] each token request has a secret: the same after a reconnect, and after a reload of the tab");
+  {
+    reset();
+    const storage = new Map<string, string>();
+    (globalThis as any).sessionStorage = { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value) };
+    const setup = await joinedRoom([]);
+    const secret = tokenRequests[0].body.secret;
+    check(typeof secret === "string" && secret.length >= 16, "a secret of 16 or more characters");
+    setup.ws.drop(1006);
+    await advance(2_000);
+    check(tokenRequests[1]?.body.secret === secret, "the same one after a reconnect");
+    setup.room.disconnect();
+    reset();
+    const reloaded = await joinedRoom([]);
+    check(tokenRequests[0].body.secret === secret, "the same one in a new room with this viewer id, from sessionStorage");
+    reloaded.room.disconnect();
+    delete (globalThis as any).sessionStorage;
+  }
+
+  console.log("[31] a live connection with another secret has this viewer id: the room closes");
+  {
+    reset();
+    const setup = await joinedRoom([]);
+    setup.ws.drop(CloseCode.CLOSE_CODE_ID_IN_USE);
+    await flush();
+    check(setup.errors.at(-1)?.code === "viewer_id_in_use", "onError viewer_id_in_use");
+    check(setup.statuses.at(-1) === "closed", "closed");
+    await advance(5_000);
+    check(tokenRequests.length === 1, "not tried again");
+  }
+
+  console.log("[32] the secret is kept only for a viewer id the app chose; the app can give its own");
+  {
+    reset();
+    const storage = new Map<string, string>();
+    (globalThis as any).sessionStorage = { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value) };
+    const options = { apiUrl: "https://worker.test/cloudflare", apiKey: "viewer-key", roomId: "lab-a", microphone: false };
+    const random = new CloudflareRoom(options);
+    random.connect();
+    await flush();
+    check(tokenRequests[0]?.body.secret.length >= 16 && storage.size === 0, "a random viewer id: a secret, not kept");
+    random.disconnect();
+
+    reset();
+    const own = new CloudflareRoom({ ...options, viewerId: "alice", secret: "kept-by-the-app-0123" });
+    own.connect();
+    await flush();
+    check(tokenRequests[0]?.body.secret === "kept-by-the-app-0123" && storage.size === 0, "the app's own secret, used as it is");
+    own.disconnect();
+
+    let refused = false;
+    try {
+      new CloudflareRoom({ ...options, secret: "too-short" });
+    } catch {
+      refused = true;
+    }
+    check(refused, "a secret under 16 characters throws");
+    delete (globalThis as any).sessionStorage;
+  }
 }
 
 main().then(() => {
