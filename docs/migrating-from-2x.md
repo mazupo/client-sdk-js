@@ -1,5 +1,7 @@
 # Migrating from picamera.js 2.x to @mazupo/client 3.0
 
+This page moves you to 3.0, where the class was `PiCamera`. 4.0 replaced `PiCamera` with `MqttCamera` and `LiveKitRoom`: after this page, read [Migrating from 3.x](migrating-from-3x.md).
+
 Three things changed at once: the package moved to the `mazupo` org, the public API
 dropped its Hungarian-style prefixes, and the wire protocol was redesigned.
 

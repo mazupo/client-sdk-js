@@ -1,7 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
+import type { Connection } from '../../connection/connection';
+import type { SfuRoom, SfuRoomDevice, SfuRoomViewer } from '../../connection/sfu-room';
+import type { GamepadOptions } from '../../connection/types';
 import { GamepadSampler } from '../sampler';
-import { GamepadSamplerOptions, IpcSink, SuspendReason } from '../types';
+import { SuspendReason } from '../types';
 
 export interface UseGamepadResult {
   /** Whether a pad is currently reporting. */
@@ -12,27 +15,41 @@ export interface UseGamepadResult {
   sampler: GamepadSampler;
 }
 
-export interface UseGamepadOptions extends Omit<GamepadSamplerOptions, 'sink'> {
-  /** Where to send input. A `PiCamera` fits, as soon as it exists — connected or not. */
-  camera?: IpcSink | null;
+export interface UseGamepadOptions extends GamepadOptions {
+  /** In a room, only these devices. By default the gamepad goes where `sendText()` goes. */
+  deviceIds?: string[];
 }
 
-/**
- * Starts one sampler for the life of the component, and puts only `connected` and
- * `suspended` in state. Readings arrive 60/s; holding them here would re-render the caller.
- */
-export function useGamepad(options: UseGamepadOptions = {}): UseGamepadResult {
-  const { camera = null, hz, endpoint, sampleWhileHidden } = options;
+type AnyRoom = SfuRoom<SfuRoomDevice, SfuRoomViewer>;
+
+/** Sends a gamepad to a connection, or only reads it with `null`. State holds only `connected` and `suspended`. */
+export function useGamepad(connection: Connection | null = null, options: UseGamepadOptions = {}): UseGamepadResult {
+  const { hz, endpoint, sampleWhileHidden, deviceIds } = options;
 
   const [connected, setConnected] = useState(false);
   const [suspended, setSuspended] = useState<SuspendReason | null>(null);
 
   // Built once: rebuilding it on an option change would drop the loop mid-flight.
-  const samplerRef = useRef<GamepadSampler | null>(null);
-  if (samplerRef.current === null) {
-    samplerRef.current = new GamepadSampler({ hz, endpoint, sampleWhileHidden });
+  const standaloneRef = useRef<GamepadSampler | null>(null);
+  if (standaloneRef.current === null) {
+    standaloneRef.current = new GamepadSampler({ hz, endpoint, sampleWhileHidden });
   }
-  const sampler = samplerRef.current;
+  const standalone = standaloneRef.current;
+
+  // A connection has one sampler of its own, so its readings carry one sequence.
+  const sampler = useMemo(
+    () => connection ? connection.gamepad({ hz, endpoint, sampleWhileHidden }) : standalone,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [connection, standalone],
+  );
+
+  const devicesKey = deviceIds?.join('\n');
+  useEffect(() => {
+    if (connection && 'sendTextTo' in connection) {
+      (connection as AnyRoom).gamepad({ deviceIds });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connection, devicesKey]);
 
   useEffect(() => {
     const offSnapshot = sampler.onSnapshot((snapshot) => {
@@ -53,11 +70,6 @@ export function useGamepad(options: UseGamepadOptions = {}): UseGamepadResult {
       sampler.stop();
     };
   }, [sampler]);
-
-  // Only when the camera itself changes; its connection state is not React's business.
-  useEffect(() => {
-    sampler.setSink(camera);
-  }, [sampler, camera]);
 
   return { connected, suspended, sampler };
 }

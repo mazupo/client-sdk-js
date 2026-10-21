@@ -1,20 +1,21 @@
 import mqtt, { MqttClient as MqttLibClient, IClientOptions, MqttProtocol } from 'mqtt';
 import { SignalingClient, generateUUID } from './signaling-client';
-import { PiCameraOptions } from '../pi-camera.types';
 
 export type MqttTopicType = 'offer' | 'answer' | 'ice';
 
-export interface MqttConnectionOptions {
-  mqttHost?: string;
-  mqttPath?: string;
-  mqttPort?: number;
-  mqttProtocol?: MqttProtocol;
-  mqttUsername?: string;
-  mqttPassword?: string;
+export interface MqttClientOptions {
+  /** The device's --uid: it prefixes the topics. */
+  deviceId: string;
+  host: string;
+  port?: number;
+  path: string;
+  protocol: MqttProtocol;
+  username?: string;
+  password?: string;
 }
 
 export class MqttClient implements SignalingClient<MqttClient, MqttTopicType> {
-  private options: PiCameraOptions;
+  private options: MqttClientOptions;
   private clientId: string;
   private client: MqttLibClient;
   private readonly topics: MqttTopicType[] = ['offer', 'answer', 'ice'];
@@ -25,17 +26,17 @@ export class MqttClient implements SignalingClient<MqttClient, MqttTopicType> {
   public onAnswer?: (sdp: RTCSessionDescription) => void;
   public onOffer?: (sdp: RTCSessionDescription) => void;
 
-  constructor(options: PiCameraOptions) {
+  constructor(options: MqttClientOptions) {
     this.options = options;
     this.clientId = generateUUID();
     const connectionOptions: IClientOptions = {
-      host: this.options.mqttHost,
-      port: this.options.mqttPort,
-      path: this.options.mqttPath,
+      host: this.options.host,
+      port: this.options.port,
+      path: this.options.path,
       clientId: this.clientId,
-      username: this.options.mqttUsername,
-      password: this.options.mqttPassword,
-      protocol: this.options.mqttProtocol,
+      username: this.options.username,
+      password: this.options.password,
+      protocol: this.options.protocol,
       keepalive: 20,
       protocolVersion: 5,
       clean: true,
@@ -48,7 +49,7 @@ export class MqttClient implements SignalingClient<MqttClient, MqttTopicType> {
 
   connect = () => {
     this.client.on('connect', () => {
-      console.debug(`MQTT connected to "${this.options.uid}" with clientId: ${this.clientId}`);
+      console.debug(`MQTT connected to "${this.options.deviceId}" with clientId: ${this.clientId}`);
 
       const fullTopics = this.topics.map((t) => this.getFullTopic(t));
       this.client.subscribe(fullTopics, { qos: 2, nl: true }, (err) => {
@@ -64,11 +65,11 @@ export class MqttClient implements SignalingClient<MqttClient, MqttTopicType> {
     this.client.on('message', (topic, message) => this.handleMessage(topic, message.toString()));
 
     this.client.on('reconnect', () => {
-      console.debug(`MQTT reconnecting to "${this.options.uid}"...`);
+      console.debug(`MQTT reconnecting to "${this.options.deviceId}"...`);
     });
 
     this.client.on('close', () => {
-      console.debug(`MQTT connection closed for "${this.options.uid}".`);
+      console.debug(`MQTT connection closed for "${this.options.deviceId}".`);
     });
 
     this.client.on('error', (err) => {
@@ -113,12 +114,12 @@ export class MqttClient implements SignalingClient<MqttClient, MqttTopicType> {
 
     this.client.end(true);
 
-    console.debug(`MQTT disconnected from "${this.options.uid}" with clientId: ${this.clientId}`);
+    console.debug(`MQTT disconnected from "${this.options.deviceId}" with clientId: ${this.clientId}`);
   }
 
   isConnected = (): boolean => this.client.connected ?? false;
 
   private getFullTopic(topic: MqttTopicType): string {
-    return `${this.options.uid}/${topic}/${this.clientId}`;
+    return `${this.options.deviceId}/${topic}/${this.clientId}`;
   }
 }

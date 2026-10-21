@@ -1,29 +1,54 @@
 # LiveKit
 
-Watch through a LiveKit SFU. Everyone in the room sees the same stream, so the device uploads one copy, no matter how many people watch.
+Watch through a LiveKit SFU. Everyone in the room sees the same streams, so a device uploads one copy, no matter how many people watch.
 
-The example below uses the free test server. First, start the device in the same room, as shown in [SFU: LiveKit](https://mazupo.com/docs/pi-webrtc/signaling/sfu#livekit) in the pi-webrtc docs. That page also lists the limits of the test server, and how to use your own.
+The example uses the free test server. Start the device in the same room first. See [SFU: LiveKit](https://mazupo.com/docs/pi-webrtc/signaling/sfu#livekit).
 
 ```javascript
-import { PiCamera } from '@mazupo/client';
+import { LiveKitRoom } from '@mazupo/client';
 
-const videoRef = document.getElementById('videoElement');
-const camera = new PiCamera({
-  signaling: 'livekit',
-  livekitUrl: 'wss://api.mazupo.com',
-  livekitKey: 'APIWnQTs4tmUZvA',
-  livekitRoom: 'my-first-room',
+const room = new LiveKitRoom({
+  url: 'wss://api.mazupo.com',
+  apiKey: 'APIWnQTs4tmUZvA',
+  roomId: 'my-first-room',
 });
 
-camera.onSfuStream = (_sid, stream) => {
-  if (videoRef instanceof HTMLVideoElement) {
-    videoRef.srcObject = stream;
+const tiles = document.getElementById('tiles');
+
+// Called with the whole list after every change.
+room.onDevices = (devices) => {
+  for (const device of devices) {
+    let video = document.getElementById(`video-${device.deviceId}`);
+    if (!video) {
+      video = document.createElement('video');
+      video.id = `video-${device.deviceId}`;
+      video.autoplay = true;
+      video.playsInline = true;
+      video.muted = true;
+      tiles.append(video);
+    }
+    if (video.srcObject !== (device.stream ?? null)) {
+      video.srcObject = device.stream ?? null;
+    }
   }
 };
 
-camera.connect();
+room.connect();
 ```
 
-`onSfuStream` gives the publisher's id (`sid`) with the stream.
+A participant whose video arrives is a device. Everyone else is a viewer, in `onViewers`.
 
-Over LiveKit, only the IPC channels work: `sendText()`, `sendData()` and `onMessage`. Snapshots, recording and file downloads need the `mqtt` signaling.
+## Messages
+
+Over LiveKit, only the IPC channels work: there are no snapshots, recording or file downloads.
+
+```javascript
+room.onMessage = (data, deviceId) => {
+  console.log(deviceId, new TextDecoder().decode(data));
+};
+
+room.sendText('to everyone in the room');
+room.sendTextTo('your-device-id', 'only to this device');
+```
+
+See [LiveKitRoom](../reference/livekit-room.md) for every option and event.

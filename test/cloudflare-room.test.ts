@@ -1,0 +1,1106 @@
+// CloudflareRoom against a fake worker: the viewer rules a cf-sfu-worker expects, without a
+// browser. fetch, WebSocket, RTCPeerConnection, MediaStream and the clock are all fakes.
+//
+// Build and run:
+//   npx esbuild test/cloudflare-room.test.ts --bundle --platform=node --outfile=/tmp/t.cjs && node /tmp/t.cjs
+
+import { setImmediate as realSetImmediate } from "node:timers";
+import {
+  CloseCode,
+  DeviceInfo,
+  DeviceState,
+  ErrorCode,
+  ViewerRequest,
+  ViewerResponse,
+} from "../src/proto/cloudflare";
+import { Packet } from "../src/proto/packet";
+import { CloudflareRoom } from "../src/cloudflare/room";
+import { RoomDevice, RoomViewerInfo } from "../src/cloudflare/types";
+import { ConnectionError, ConnectionStatus } from "../src/connection/types";
+
+let failures = 0;
+
+function check(ok: boolean, what: string) {
+  console.log((ok ? "  ok   " : "  FAIL ") + what);
+  if (!ok) {
+    failures++;
+  }
+}
+
+// --- clock -----------------------------------------------------------------------------------
+
+let now = 1_000_000;
+let nextTimer = 1;
+const timers: { id: number; at: number; fn: () => void }[] = [];
+(globalThis as any).setTimeout = (fn: () => void, ms = 0) => {
+  const id = nextTimer++;
+  timers.push({ id, at: now + ms, fn });
+  return id;
+};
+(globalThis as any).clearTimeout = (id: number) => {
+  const index = timers.findIndex((timer) => timer.id === id);
+  if (index >= 0) {
+    timers.splice(index, 1);
+  }
+};
+(globalThis as any).setInterval = () => 0;
+(globalThis as any).clearInterval = () => undefined;
+Date.now = () => now;
+Math.random = () => 0;
+
+/** Lets promise chains and handlers run. */
+async function flush() {
+  for (let i = 0; i < 20; i++) {
+    await new Promise((resolve) => realSetImmediate(resolve));
+  }
+}
+
+/** Moves the clock, running each timer that comes due. */
+async function advance(ms: number) {
+  const end = now + ms;
+  for (;;) {
+    timers.sort((a, b) => a.at - b.at);
+    const timer = timers[0];
+    if (!timer || timer.at > end) {
+      break;
+    }
+    timers.shift();
+    now = timer.at;
+    timer.fn();
+    await flush();
+  }
+  now = end;
+  await flush();
+}
+
+// --- fetch -----------------------------------------------------------------------------------
+
+const tokenRequests: { url: string; headers: Record<string, string>; body: any }[] = [];
+let tokenStatus = 200;
+/** The worker never answers: the request waits until it is aborted. */
+let tokenHang = false;
+(globalThis as any).fetch = async (url: string, init: any) => {
+  tokenRequests.push({ url, headers: init.headers, body: JSON.parse(init.body) });
+  if (tokenHang) {
+    return new Promise((_resolve, reject) => init.signal?.addEventListener("abort", () => reject(new Error("aborted"))));
+  }
+  const ok = tokenStatus === 200;
+  return {
+    ok,
+    status: tokenStatus,
+    json: async () => (ok ? { token: `token-${tokenRequests.length}`, url: "wss://worker.test/sfu/rtc" } : { error: { code: "unauthorized", message: "Wrong key." } }),
+  };
+};
+
+// --- WebSocket -------------------------------------------------------------------------------
+
+class Emitter {
+  private listeners = new Map<string, Set<(event: any) => void>>();
+  addEventListener(type: string, fn: (event: any) => void) {
+    if (!this.listeners.has(type)) {
+      this.listeners.set(type, new Set());
+    }
+    this.listeners.get(type)!.add(fn);
+  }
+  removeEventListener(type: string, fn: (event: any) => void) {
+    this.listeners.get(type)?.delete(fn);
+  }
+  dispatch(type: string, event: any = {}) {
+    for (const fn of [...(this.listeners.get(type) ?? [])]) {
+      fn(event);
+    }
+  }
+}
+
+class FakeWebSocket extends Emitter {
+  static CONNECTING = 0;
+  static OPEN = 1;
+  static CLOSING = 2;
+  static CLOSED = 3;
+  static all: FakeWebSocket[] = [];
+  readyState = FakeWebSocket.CONNECTING;
+  binaryType = "blob";
+  /** Requests the room sent, decoded. */
+  sent: ViewerRequest[] = [];
+  closedBy?: number;
+
+  constructor(public url: string) {
+    super();
+    FakeWebSocket.all.push(this);
+  }
+  send(data: string | Uint8Array) {
+    if (typeof data !== "string") {
+      this.sent.push(ViewerRequest.decode(data));
+    }
+  }
+  close(code = 1000) {
+    this.closedBy = code;
+    this.readyState = FakeWebSocket.CLOSED;
+  }
+  /** The worker accepts the socket. */
+  open() {
+    this.readyState = FakeWebSocket.OPEN;
+    this.dispatch("open");
+  }
+  /** The worker sends a response. */
+  receive(response: Parameters<typeof ViewerResponse.fromPartial>[0]) {
+    const bytes = ViewerResponse.encode(ViewerResponse.fromPartial(response)).finish();
+    this.dispatch("message", { data: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) });
+  }
+  /** The worker closes the socket. */
+  drop(code: number) {
+    this.readyState = FakeWebSocket.CLOSED;
+    this.dispatch("close", { code, reason: "" });
+  }
+  /** The requests of one kind, e.g. "subscribe". */
+  requests<K extends keyof ViewerRequest>(kind: K): NonNullable<ViewerRequest[K]>[] {
+    return this.sent.filter((request) => request[kind] !== undefined).map((request) => request[kind]!);
+  }
+}
+(globalThis as any).WebSocket = FakeWebSocket;
+
+// --- WebRTC ----------------------------------------------------------------------------------
+
+class FakeChannel extends Emitter {
+  readyState: RTCDataChannelState = "connecting";
+  binaryType = "blob";
+  sent: Uint8Array[] = [];
+  bufferedAmount = 0;
+  constructor(public label: string, public init: RTCDataChannelInit) {
+    super();
+  }
+  send(data: Uint8Array) {
+    this.sent.push(data);
+  }
+  close() {
+    if (this.readyState !== "closed") {
+      this.readyState = "closed";
+      this.dispatch("close");
+    }
+  }
+  open() {
+    this.readyState = "open";
+    this.dispatch("open");
+  }
+  receive(bytes: Uint8Array) {
+    this.dispatch("message", { data: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) });
+  }
+}
+
+class FakeTrack {
+  enabled = true;
+  stopped = false;
+  constructor(public id: string, public kind: string) {}
+  stop() {
+    this.stopped = true;
+  }
+}
+
+class FakePeer extends Emitter {
+  static all: FakePeer[] = [];
+  connectionState: RTCPeerConnectionState = "new";
+  channels: FakeChannel[] = [];
+  transceivers: any[] = [];
+  localDescription: RTCSessionDescriptionInit | null = null;
+  remote: RTCSessionDescriptionInit[] = [];
+  signalingState: RTCSignalingState = "stable";
+  rollbacks = 0;
+  /** Our own microphone, once offered. */
+  micTransceiver: any = null;
+  private offers = 0;
+  constructor(public config: RTCConfiguration) {
+    super();
+    FakePeer.all.push(this);
+  }
+  createDataChannel(label: string, init: RTCDataChannelInit) {
+    const channel = new FakeChannel(label, init);
+    this.channels.push(channel);
+    return channel;
+  }
+  async createOffer() {
+    return { type: "offer", sdp: `offer-${FakePeer.all.indexOf(this)}-${++this.offers}` };
+  }
+  async createAnswer() {
+    return { type: "answer", sdp: `answer-${FakePeer.all.indexOf(this)}` };
+  }
+  async setLocalDescription(description: RTCSessionDescriptionInit) {
+    if (description.type === "rollback") {
+      this.rollbacks++;
+      this.signalingState = "stable";
+      return;
+    }
+    this.localDescription = description;
+    this.signalingState = description.type === "offer" ? "have-local-offer" : "stable";
+    // An offer gives a mid to a transceiver added for it.
+    for (const transceiver of this.transceivers) {
+      if (!transceiver.mid) {
+        transceiver.mid = `mic-${FakePeer.all.indexOf(this)}`;
+      }
+    }
+  }
+  async setRemoteDescription(description: RTCSessionDescriptionInit) {
+    this.remote.push(description);
+    this.signalingState = description.type === "offer" ? "have-remote-offer" : "stable";
+  }
+  addTransceiver(track: FakeTrack, init: RTCRtpTransceiverInit) {
+    const transceiver = {
+      mid: "",
+      direction: init.direction,
+      sender: { track },
+      receiver: { track: null },
+      stopped: false,
+      stop() {
+        this.stopped = true;
+      },
+    };
+    this.transceivers.push(transceiver);
+    this.micTransceiver = transceiver;
+    return transceiver;
+  }
+  getTransceivers() {
+    return this.transceivers;
+  }
+  getReceivers() {
+    return this.transceivers.map((transceiver) => transceiver.receiver);
+  }
+  async getStats() {
+    return new Map();
+  }
+  close() {
+    this.connectionState = "closed";
+  }
+  /** RtcPeer listens through the on* properties, so events go to both. */
+  override dispatch(type: string, event: any = {}) {
+    super.dispatch(type, event);
+    (this as any)[`on${type}`]?.(event);
+  }
+  setState(state: RTCPeerConnectionState) {
+    this.connectionState = state;
+    this.dispatch("connectionstatechange");
+  }
+  /** The SFU's offer added a track on this mid. */
+  addTrack(mid: string, kind = "video") {
+    const receiver = { track: new FakeTrack(`${kind}-${mid}`, kind) };
+    const transceiver = { mid, receiver };
+    this.transceivers.push(transceiver);
+    this.dispatch("track", { receiver, track: receiver.track, transceiver, streams: [] });
+  }
+  channel(label: string) {
+    return this.channels.filter((channel) => channel.label === label).at(-1);
+  }
+}
+(globalThis as any).RTCPeerConnection = FakePeer;
+(globalThis as any).MediaStream = class {
+  constructor(private tracks: FakeTrack[]) {}
+  getTracks() {
+    return this.tracks;
+  }
+  getAudioTracks() {
+    return this.tracks.filter((track) => track.kind === "audio");
+  }
+};
+
+// --- microphone ------------------------------------------------------------------------------
+
+/** Our own offers that publish the microphone: the ones with a track. */
+function micOffers(ws: { requests(kind: string): any[] }): any[] {
+  return ws.requests("offer").filter((offer) => offer.tracks?.length > 0);
+}
+
+let micResult: "grant" | "deny" = "grant";
+let micRequests = 0;
+/** While true, the browser keeps asking: each request waits for its function in heldMics. */
+let micHold = false;
+const heldMics: (() => void)[] = [];
+/** Every microphone track the browser gave. */
+const micTracks: FakeTrack[] = [];
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  writable: true,
+  value: {
+    mediaDevices: {
+      async getUserMedia() {
+        micRequests++;
+        if (micResult === "deny") {
+          throw new Error("Permission denied");
+        }
+        const track = new FakeTrack(`mic-${micRequests}`, "audio");
+        micTracks.push(track);
+        const stream = new (globalThis as any).MediaStream([track]);
+        return micHold ? new Promise((resolve) => heldMics.push(() => resolve(stream))) : stream;
+      },
+    },
+  },
+});
+
+// --- helpers ---------------------------------------------------------------------------------
+
+const LIVE = DeviceState.DEVICE_STATE_LIVE;
+const SLEEPING = DeviceState.DEVICE_STATE_SLEEPING;
+
+function device(deviceId: string, state: DeviceState, generation: number, extra: Partial<DeviceInfo> = {}): DeviceInfo {
+  return DeviceInfo.fromPartial({
+    deviceId,
+    state,
+    generation,
+    tracks: state === LIVE ? ["video"] : [],
+    ...extra,
+  });
+}
+
+interface Setup {
+  room: CloudflareRoom;
+  ws: FakeWebSocket;
+  pc: FakePeer;
+  devices: () => RoomDevice[];
+  statuses: ConnectionStatus[];
+  errors: ConnectionError[];
+  messages: { deviceId: string; text: string }[];
+  viewerLists: RoomViewerInfo[][];
+}
+
+/** A room joined with these devices, its own offer answered and its PeerConnection connected. */
+async function joinedRoom(
+  devices: DeviceInfo[],
+  options: { ipc?: boolean; connect?: boolean; microphone?: boolean; viewers?: ({ viewerId: string } & Record<string, unknown>)[] } = {},
+): Promise<Setup> {
+  const room = new CloudflareRoom({
+    apiUrl: "https://worker.test/sfu/",
+    apiKey: "viewer-key",
+    roomId: "lab-a",
+    viewerId: "alice",
+    ipc: options.ipc,
+    microphone: options.microphone ?? false,
+  });
+  let latest: RoomDevice[] = [];
+  const statuses: ConnectionStatus[] = [];
+  const errors: ConnectionError[] = [];
+  const messages: { deviceId: string; text: string }[] = [];
+  const viewerLists: RoomViewerInfo[][] = [];
+  room.onDevices = (list) => (latest = list);
+  room.onViewers = (list) => viewerLists.push(list);
+  room.onStatus = (status) => statuses.push(status);
+  room.onError = (error) => errors.push(error);
+  room.onMessage = (data, deviceId) => messages.push({ deviceId, text: new TextDecoder().decode(data) });
+  room.connect();
+  await flush();
+  const ws = FakeWebSocket.all.at(-1)!;
+  ws.open();
+  ws.receive({
+    joined: {
+      viewerId: "alice",
+      room: "lab-a",
+      resumed: false,
+      iceServers: [{ urls: ["stun:stun.cloudflare.com:3478"] }],
+      devices,
+      viewers: options.viewers ?? [],
+    },
+  });
+  await flush();
+  const pc = FakePeer.all.at(-1)!;
+  if (options.connect !== false) {
+    ws.receive({ answer: { sdp: "sfu-answer" } });
+    await flush();
+    pc.setState("connected");
+    await flush();
+  }
+  return { room, ws, pc, devices: () => latest, statuses, errors, messages, viewerLists };
+}
+
+/** The worker answers the subscribe in flight with this offer and these subscriptions. */
+async function subscribed(setup: Setup, tracks: { deviceId: string; trackName: string; mid: string; generation: number }[]) {
+  setup.ws.receive({ offer: { sdp: "sfu-offer", tracks } });
+  await flush();
+  for (const track of tracks) {
+    if (!setup.pc.transceivers.some((transceiver) => transceiver.mid === track.mid)) {
+      setup.pc.addTrack(track.mid);
+    }
+  }
+  setup.ws.receive({ subscribed: { tracks } });
+  await flush();
+}
+
+function ipcText(text: string): Uint8Array {
+  return Packet.encode(Packet.fromPartial({ raw: new TextEncoder().encode(text) })).finish();
+}
+
+function reset() {
+  FakeWebSocket.all = [];
+  FakePeer.all = [];
+  tokenRequests.length = 0;
+  tokenStatus = 200;
+  tokenHang = false;
+  timers.length = 0;
+}
+
+// --- tests -----------------------------------------------------------------------------------
+
+async function main() {
+  console.log("[1] the token comes from {apiUrl}/token with the viewer key");
+  {
+    reset();
+    const { room } = await joinedRoom([], { ipc: false });
+    const request = tokenRequests[0];
+    check(request.url === "https://worker.test/sfu/token", `url ${request.url}`);
+    check(request.headers.Authorization === "Bearer viewer-key", "bearer viewer key");
+    check(request.body.viewer_id === "alice" && request.body.room_id === "lab-a" && request.body.can_subscribe === true, "viewer_id, room_id, can_subscribe");
+    check(!("data_channels" in request.body), "no data_channels without ipc");
+    check(FakeWebSocket.all[0].url === `wss://worker.test/sfu/rtc?access_token=token-1`, "the socket uses the token");
+    room.disconnect();
+    reset();
+    const ipcRoom = await joinedRoom([], { ipc: true });
+    check(tokenRequests[0].body.data_channels === true, "data_channels with ipc");
+    ipcRoom.room.disconnect();
+  }
+
+  console.log("[2] joined: its own offer at once, with server-events on id 0");
+  {
+    reset();
+    const { room, ws, pc } = await joinedRoom([device("cam", SLEEPING, 0)], { connect: false });
+    check(JSON.stringify(pc.config.iceServers) === JSON.stringify([{ urls: ["stun:stun.cloudflare.com:3478"] }]), "ICE servers from joined, empty credentials left out");
+    const events = pc.channel("server-events");
+    check(events?.init.negotiated === true && events?.init.id === 0, "negotiated server-events, id 0");
+    check(ws.requests("offer").length === 1 && ws.requests("offer")[0].sdp === "offer-0-1", "the offer went out");
+    room.disconnect();
+  }
+
+  console.log("[3] subscribes only once the PeerConnection is connected");
+  {
+    reset();
+    const setup = await joinedRoom([device("cam", LIVE, 1)], { connect: false });
+    check(setup.ws.requests("subscribe").length === 0, "nothing before the answer");
+    setup.ws.receive({ answer: { sdp: "sfu-answer" } });
+    await flush();
+    check(setup.pc.remote.at(-1)?.sdp === "sfu-answer", "answer applied");
+    check(setup.ws.requests("subscribe").length === 0, "nothing while connecting");
+    setup.pc.setState("connected");
+    await flush();
+    const subs = setup.ws.requests("subscribe");
+    check(subs.length === 1 && subs[0].tracks[0]?.deviceId === "cam" && subs[0].tracks[0]?.trackName === "video", "subscribe once connected");
+    setup.room.disconnect();
+  }
+
+  console.log("[4] the SFU's offer is answered and the tracks are grouped by device");
+  {
+    reset();
+    const setup = await joinedRoom([device("cam", LIVE, 1, { tracks: ["video", "audio"] })]);
+    await subscribed(setup, [
+      { deviceId: "cam", trackName: "video", mid: "1", generation: 1 },
+      { deviceId: "cam", trackName: "audio", mid: "2", generation: 1 },
+    ]);
+    check(setup.ws.requests("answer").at(-1)?.sdp === "answer-0", "answer sent");
+    const cam = setup.devices().find((info) => info.deviceId === "cam");
+    check(cam?.state === "live", "live");
+    check(cam?.stream?.getTracks().length === 2, "one stream with both tracks");
+    const first = cam?.stream;
+    setup.ws.receive({ device: device("cam", LIVE, 1, { tracks: ["video", "audio"] }) });
+    await flush();
+    check(setup.devices()[0].stream === first, "same stream while the tracks stay");
+    setup.room.disconnect();
+  }
+
+  console.log("[5] a device that stops publishing is unsubscribed");
+  {
+    reset();
+    const setup = await joinedRoom([device("cam", LIVE, 1)]);
+    await subscribed(setup, [{ deviceId: "cam", trackName: "video", mid: "1", generation: 1 }]);
+    setup.ws.receive({ device: device("cam", SLEEPING, 1) });
+    await flush();
+    check(JSON.stringify(setup.ws.requests("unsubscribe").at(-1)?.mids) === JSON.stringify(["1"]), "unsubscribe mid 1");
+    setup.room.disconnect();
+  }
+
+  console.log("[6] a refusal for good waits for the next publication; one for now is retried");
+  {
+    reset();
+    const setup = await joinedRoom([device("cam", LIVE, 1), device("cam2", LIVE, 1)]);
+    setup.ws.receive({ error: { code: ErrorCode.ERROR_CODE_VIEWER_LIMIT, request: "subscribe", deviceId: "cam", message: "full" } });
+    setup.ws.receive({ error: { code: ErrorCode.ERROR_CODE_TRACK_NOT_READY, request: "subscribe", deviceId: "cam2", message: "not yet" } });
+    await subscribed(setup, []);
+    check(setup.devices().find((info) => info.deviceId === "cam")?.error === "viewer_limit", "the refusal shows on the device");
+    const before = setup.ws.requests("subscribe").length;
+    await advance(500);
+    check(setup.ws.requests("subscribe").length === before, "nothing asked within the backoff");
+    await advance(600);
+    const again = setup.ws.requests("subscribe").at(-1);
+    check(setup.ws.requests("subscribe").length === before + 1, "asked again after 1 s");
+    check(again?.tracks.length === 1 && again.tracks[0].deviceId === "cam2", "only the device refused for now");
+    await subscribed(setup, [{ deviceId: "cam2", trackName: "video", mid: "1", generation: 1 }]);
+    setup.ws.receive({ device: device("cam", LIVE, 2) });
+    await flush();
+    check(setup.ws.requests("subscribe").at(-1)?.tracks[0]?.deviceId === "cam", "a new publication is asked for");
+    setup.room.disconnect();
+  }
+
+  console.log("[7] a device that left the room is forgotten, so its generation 1 is asked for again");
+  {
+    reset();
+    const setup = await joinedRoom([device("cam", LIVE, 1)]);
+    setup.ws.receive({ error: { code: ErrorCode.ERROR_CODE_VIEWER_LIMIT, request: "subscribe", deviceId: "cam", message: "full" } });
+    await subscribed(setup, []);
+    setup.ws.receive({ members: { devices: [] } });
+    await flush();
+    check(setup.devices().length === 0, "gone from the list");
+    setup.ws.receive({ members: { devices: [device("cam", LIVE, 1)] } });
+    await flush();
+    check(setup.ws.requests("subscribe").at(-1)?.tracks[0]?.deviceId === "cam", "asked for again");
+    setup.room.disconnect();
+  }
+
+  console.log("[8] a failed PeerConnection is rebuilt with a new offer");
+  {
+    reset();
+    const setup = await joinedRoom([device("cam", LIVE, 1)]);
+    await subscribed(setup, [{ deviceId: "cam", trackName: "video", mid: "1", generation: 1 }]);
+    setup.pc.setState("failed");
+    await flush();
+    const second = FakePeer.all.at(-1)!;
+    check(FakePeer.all.length === 2 && setup.pc.connectionState === "closed", "a new PeerConnection");
+    check(setup.ws.requests("offer").at(-1)?.sdp === "offer-1-1", "its own offer");
+    check(setup.devices()[0].stream === undefined, "no stream until subscribed again");
+    // Requests about the old session are ignored until the answer.
+    setup.ws.receive({ subscribed: { tracks: [{ deviceId: "cam", trackName: "video", mid: "1", generation: 1 }] } });
+    setup.ws.receive({ offer: { sdp: "stale-offer", tracks: [] } });
+    await flush();
+    check(second.remote.length === 0 && setup.ws.requests("answer").length === 1, "offer and subscribed ignored while our offer waits");
+    setup.ws.receive({ answer: { sdp: "sfu-answer-2" } });
+    await flush();
+    second.setState("connected");
+    await flush();
+    check(setup.ws.requests("subscribe").length === 2, "subscribes again on the new session");
+    setup.room.disconnect();
+  }
+
+  console.log("[9] a PeerConnection still not connected 4 s after a device went live is rebuilt");
+  {
+    reset();
+    const setup = await joinedRoom([device("cam", SLEEPING, 0)], { connect: false });
+    setup.ws.receive({ answer: { sdp: "sfu-answer" } });
+    await flush();
+    setup.ws.receive({ device: device("cam", LIVE, 1) });
+    await flush();
+    await advance(3_900);
+    check(FakePeer.all.length === 1, "not before 4 s");
+    await advance(200);
+    check(FakePeer.all.length === 2 && setup.ws.requests("offer").length === 2, "rebuilt with a new offer");
+    setup.room.disconnect();
+  }
+
+  console.log("[10] an offer the worker could not take is tried again after a backoff");
+  {
+    reset();
+    const setup = await joinedRoom([], { connect: false });
+    setup.ws.receive({ error: { code: ErrorCode.ERROR_CODE_SFU, request: "offer", message: "SFU timeout" } });
+    await flush();
+    await advance(1_900);
+    check(FakePeer.all.length === 1, "waits");
+    await advance(200);
+    check(FakePeer.all.length === 2 && setup.ws.requests("offer").length === 2, "new PeerConnection and offer after 2 s");
+    setup.room.disconnect();
+  }
+
+  console.log("[11] session_reset: a new PeerConnection answers, then sends its own offer");
+  {
+    reset();
+    const setup = await joinedRoom([device("cam", LIVE, 1)]);
+    setup.ws.receive({ offer: { sdp: "reset-offer", sessionReset: true, tracks: [{ deviceId: "cam", trackName: "video", mid: "1", generation: 1 }] } });
+    await flush();
+    const second = FakePeer.all.at(-1)!;
+    check(FakePeer.all.length === 2 && second.remote[0]?.sdp === "reset-offer", "the new PeerConnection takes the offer");
+    check(setup.ws.requests("offer").length === 1, "no own offer yet");
+    setup.ws.receive({ subscribed: { tracks: [{ deviceId: "cam", trackName: "video", mid: "1", generation: 1 }] } });
+    await flush();
+    check(setup.ws.requests("offer").length === 2, "own offer after subscribed");
+    setup.room.disconnect();
+  }
+
+  console.log("[12] a dropped socket reconnects with a new token and resumes on the same PeerConnection");
+  {
+    reset();
+    const setup = await joinedRoom([device("cam", LIVE, 1)]);
+    await subscribed(setup, [{ deviceId: "cam", trackName: "video", mid: "1", generation: 1 }]);
+    setup.ws.drop(1006);
+    await flush();
+    check(setup.statuses.at(-1) === "reconnecting", "reconnecting");
+    await advance(1_000);
+    check(tokenRequests.length === 2 && FakeWebSocket.all.length === 2, "a new token and socket after 1 s");
+    const ws2 = FakeWebSocket.all[1];
+    ws2.open();
+    ws2.receive({
+      joined: {
+        viewerId: "alice",
+        room: "lab-a",
+        resumed: true,
+        devices: [device("cam", LIVE, 1)],
+        subscriptions: [{ deviceId: "cam", trackName: "video", mid: "1", generation: 1 }],
+      },
+    });
+    await flush();
+    check(FakePeer.all.length === 1 && ws2.requests("offer").length === 0, "same PeerConnection, no new offer");
+    check(setup.devices()[0].stream?.getTracks().length === 1, "the stream stays");
+    check(setup.statuses.at(-1) === "connected", "connected again");
+    setup.room.disconnect();
+  }
+
+  console.log("[13] resumed while our offer waited: start over");
+  {
+    reset();
+    const setup = await joinedRoom([], { connect: false });
+    setup.ws.drop(1006);
+    await advance(1_000);
+    const ws2 = FakeWebSocket.all[1];
+    ws2.open();
+    ws2.receive({ joined: { viewerId: "alice", room: "lab-a", resumed: true } });
+    await flush();
+    check(FakePeer.all.length === 2 && ws2.requests("offer").length === 1, "new PeerConnection and offer");
+    setup.room.disconnect();
+  }
+
+  console.log("[14] replaced by another connection: stop, and do not reconnect");
+  {
+    reset();
+    const setup = await joinedRoom([device("cam", LIVE, 1)]);
+    setup.ws.drop(CloseCode.CLOSE_CODE_REPLACED);
+    await flush();
+    await advance(60_000);
+    check(setup.errors.some((error) => error.code === "replaced"), "onError replaced");
+    check(setup.statuses.at(-1) === "closed", "closed");
+    check(FakeWebSocket.all.length === 1, "no new socket");
+    check(setup.devices().length === 0, "no devices");
+  }
+
+  console.log("[15] viewer_gone: join again from the start");
+  {
+    reset();
+    const setup = await joinedRoom([device("cam", LIVE, 1)]);
+    setup.ws.receive({ error: { code: ErrorCode.ERROR_CODE_VIEWER_GONE, request: "subscribe", message: "gone" } });
+    await flush();
+    check(setup.pc.connectionState === "closed", "PeerConnection closed");
+    await advance(1_000);
+    check(tokenRequests.length === 2, "a new token");
+    const ws2 = FakeWebSocket.all[1];
+    ws2.open();
+    ws2.receive({ joined: { viewerId: "alice", room: "lab-a", resumed: false, devices: [device("cam", LIVE, 1)] } });
+    await flush();
+    check(FakePeer.all.length === 2 && ws2.requests("offer").length === 1, "new PeerConnection and offer");
+    setup.room.disconnect();
+  }
+
+  console.log("[16] data channels, control and IPC");
+  {
+    reset();
+    const setup = await joinedRoom([device("cam", LIVE, 1, { dataChannels: true })], { ipc: true });
+    await subscribed(setup, [{ deviceId: "cam", trackName: "video", mid: "1", generation: 1 }]);
+    check(JSON.stringify(setup.ws.requests("subscribe").at(-1)?.data) === JSON.stringify(["cam"]), "data after the tracks");
+    const channels = [
+      { label: "_lossy", id: 2 },
+      { label: "_reliable", id: 4 },
+    ];
+    setup.ws.receive({ subscribed: { tracks: [{ deviceId: "cam", trackName: "video", mid: "1", generation: 1 }], data: [{ deviceId: "cam", generation: 1, channels, canReply: false }] } });
+    await flush();
+    const lossy = setup.pc.channel("_lossy")!;
+    const reliable = setup.pc.channel("_reliable")!;
+    check(lossy.init.negotiated === true && lossy.init.id === 2 && lossy.init.ordered === false && lossy.init.maxRetransmits === 0, "_lossy: negotiated id 2, unordered, no retransmits");
+    check(reliable.init.negotiated === true && reliable.init.id === 4 && reliable.init.ordered === true, "_reliable: negotiated id 4, ordered");
+    lossy.open();
+    reliable.open();
+    reliable.receive(ipcText("hello viewer"));
+    await flush();
+    check(setup.messages.at(-1)?.text === "hello viewer" && setup.messages.at(-1)?.deviceId === "cam", "onMessage");
+    check(!setup.room.canSendTo("cam") && !setup.room.canSend(), "cannot send before control");
+    check(setup.room.sendTextTo("cam", "nope") === false && setup.room.sendText("nope") === false && reliable.sent.length === 0, "sendTextTo and sendText refused");
+
+    setup.room.takeControl("cam");
+    check(setup.ws.requests("takeControl").at(-1)?.deviceId === "cam", "take_control sent");
+    const me = { room: "lab-a", viewerId: "alice" };
+    setup.ws.receive({ device: device("cam", LIVE, 1, { dataChannels: true, handover: me }) });
+    setup.ws.receive({ subscribed: { tracks: [{ deviceId: "cam", trackName: "video", mid: "1", generation: 1 }], data: [{ deviceId: "cam", generation: 1, channels, canReply: true }] } });
+    await flush();
+    check(setup.ws.requests("controlReady").at(-1)?.deviceId === "cam", "control_ready once canReply and _reliable is open");
+    check(setup.devices()[0].control.takingOver, "taking over");
+    setup.ws.receive({ device: device("cam", LIVE, 1, { dataChannels: true, controller: me }) });
+    await flush();
+    const cam = setup.devices()[0];
+    check(cam.control.mine && cam.canSend, "in control, can send");
+    check(setup.room.sendTextTo("cam", "hello device") === true, "sendTextTo");
+    const packet = Packet.decode(reliable.sent.at(-1)!);
+    check(new TextDecoder().decode(packet.raw) === "hello device", "Packet { raw } on _reliable");
+    check(setup.room.canSend() && setup.room.sendText("to everything I control") === true, "sendText goes to the devices this viewer controls");
+    check(new TextDecoder().decode(Packet.decode(reliable.sent.at(-1)!).raw) === "to everything I control", "and arrived on cam");
+    check(setup.room.sendTextTo("cam2", "nope") === false, "sendTextTo a device it does not control is refused");
+
+    const sampler = setup.room.gamepad({ hz: 1 });
+    check(setup.room.gamepad() === sampler, "one gamepad per connection");
+    sampler.stop();
+    // One reading at a time, by hand: the sampler's timer is stopped.
+    const buttons = Array.from({ length: 17 }, () => ({ pressed: false, touched: false, value: 0 }));
+    (globalThis as any).navigator.getGamepads = () => [{ id: "pad", index: 0, connected: true, mapping: "standard", axes: [0, 0, 0, 0], buttons, timestamp: 0 }];
+    const read = () => (sampler as any).tick();
+    const reliableBefore = reliable.sent.length;
+    read();
+    const pad = Packet.decode(lossy.sent.at(-1)!);
+    check(pad.ipc?.endpoint === "gamepad" && (pad.ipc?.payload.length ?? 0) > 0, "the gamepad goes to an endpoint on _lossy");
+    check(reliable.sent.length === reliableBefore, "and never on _reliable");
+    setup.room.gamepad({ deviceIds: ["cam2"] }).stop();
+    const before = lossy.sent.length;
+    read();
+    check(lossy.sent.length === before, "with deviceIds, only those: nothing goes to cam");
+    setup.room.gamepad({ deviceIds: ["cam"] }).stop();
+    read();
+    check(lossy.sent.length === before + 1, "and cam gets it once it is listed");
+
+    setup.ws.receive({ error: { code: ErrorCode.ERROR_CODE_NOT_CONTROLLER, request: "release_control", deviceId: "cam2", message: "no" } });
+    await flush();
+    check(setup.errors.at(-1)?.code === "not_controller" && setup.errors.at(-1)?.deviceId === "cam2", "control errors reach onError");
+
+    setup.room.releaseControl("cam");
+    check(setup.ws.requests("releaseControl").at(-1)?.deviceId === "cam", "release_control sent");
+    setup.room.disconnect();
+    check(lossy.readyState === "closed" && reliable.readyState === "closed", "channels closed on leave");
+  }
+
+  console.log("[17] disconnect: tells the worker, closes everything, empties the list; closing the page does not");
+  {
+    reset();
+    let pagehide: (() => void) | undefined;
+    (globalThis as any).addEventListener = (type: string, fn: () => void) => {
+      if (type === "pagehide") {
+        pagehide = fn;
+      }
+    };
+    (globalThis as any).removeEventListener = (type: string) => {
+      if (type === "pagehide") {
+        pagehide = undefined;
+      }
+    };
+    const setup = await joinedRoom([device("cam", LIVE, 1)]);
+    check(pagehide === undefined, "no pagehide listener: a reload within 30 s resumes");
+    setup.room.disconnect();
+    await flush();
+    check(setup.ws.requests("leave").length === 1 && setup.ws.closedBy === 1000, "leave sent, socket closed");
+    check(setup.pc.connectionState === "closed", "PeerConnection closed");
+    check(setup.statuses.at(-1) === "closed" && setup.devices().length === 0, "closed, no devices");
+    delete (globalThis as any).addEventListener;
+    delete (globalThis as any).removeEventListener;
+  }
+
+  console.log("[18] a refused token request closes the room; one with no answer is tried again");
+  {
+    reset();
+    tokenStatus = 401;
+    const room = new CloudflareRoom({ apiUrl: "https://worker.test/sfu", apiKey: "wrong", roomId: "lab-a", microphone: false });
+    const errors: ConnectionError[] = [];
+    const statuses: ConnectionStatus[] = [];
+    room.onError = (error) => errors.push(error);
+    room.onStatus = (status) => statuses.push(status);
+    room.connect();
+    await flush();
+    check(errors[0]?.code === "token" && errors[0]?.message === "Wrong key.", "onError token with the worker's message");
+    check(/^[0-9a-f-]{36}$/.test(tokenRequests[0].body.viewer_id), "a random viewer id by default");
+    check(statuses.at(-1) === "closed", "closed");
+    await advance(5_000);
+    check(tokenRequests.length === 1, "not tried again");
+
+    reset();
+    tokenHang = true;
+    const waiting = new CloudflareRoom({ apiUrl: "https://worker.test/sfu", apiKey: "viewer-key", roomId: "lab-a", microphone: false });
+    const waitErrors: ConnectionError[] = [];
+    waiting.onError = (error) => waitErrors.push(error);
+    waiting.connect();
+    await flush();
+    await advance(9_999);
+    check(waitErrors.length === 0, "still waiting after 9.999 s");
+    await advance(1);
+    check(waitErrors[0]?.code === "token" && /10 s/.test(waitErrors[0].message), "no answer in 10 s: onError token");
+    tokenHang = false;
+    await advance(1_000);
+    check(tokenRequests.length === 2, "tried again");
+    waiting.disconnect();
+  }
+  console.log("[19] takeControl before the channels open waits for them");
+  {
+    reset();
+    const setup = await joinedRoom([device("cam", LIVE, 1, { dataChannels: true }), device("cam2", LIVE, 1, { dataChannels: true })], { ipc: true });
+    setup.room.takeControl("cam");
+    setup.room.takeControl("cam2");
+    setup.room.releaseControl("cam2");
+    check(setup.ws.requests("takeControl").length === 0, "nothing sent before the channels");
+    await subscribed(setup, [
+      { deviceId: "cam", trackName: "video", mid: "1", generation: 1 },
+      { deviceId: "cam2", trackName: "video", mid: "2", generation: 1 },
+    ]);
+    const data = ["cam", "cam2"].map((deviceId, i) => ({
+      deviceId,
+      generation: 1,
+      channels: [{ label: "_lossy", id: 2 + 4 * i }, { label: "_reliable", id: 4 + 4 * i }],
+      canReply: false,
+    }));
+    setup.ws.receive({ subscribed: { tracks: [], data } });
+    await flush();
+    check(setup.ws.requests("takeControl").length === 0, "nothing while the channels connect");
+    for (const channel of setup.pc.channels.filter((c) => c.label !== "server-events")) {
+      channel.open();
+    }
+    await flush();
+    const takes = setup.ws.requests("takeControl");
+    check(takes.length === 1 && takes[0].deviceId === "cam", "sent once _reliable opened, only for the device still wanted");
+    check(setup.ws.requests("releaseControl").length === 0, "a release before sending sends nothing");
+    setup.room.disconnect();
+
+    reset();
+    const plain = await joinedRoom([device("cam", LIVE, 1, { dataChannels: true })]);
+    plain.room.takeControl("cam");
+    check(plain.ws.requests("takeControl").length === 0, "no take_control without ipc");
+    plain.room.disconnect();
+  }
+  console.log("[20] who else is in the room");
+  {
+    reset();
+    const setup = await joinedRoom([], { viewers: [{ viewerId: "alice", dataChannels: true }, { viewerId: "Bob Lee" }] });
+    check(
+      JSON.stringify(setup.viewerLists.at(-1)) ===
+        JSON.stringify([
+          { viewerId: "alice", ipc: true, away: false, me: true, microphone: false, muted: false },
+          { viewerId: "Bob Lee", ipc: false, away: false, me: false, microphone: false, muted: false },
+        ]),
+      "joined lists everyone, this viewer marked",
+    );
+    setup.ws.receive({ viewers: { viewers: [{ viewerId: "alice", dataChannels: true }, { viewerId: "Bob Lee", away: true }] } });
+    await flush();
+    check(setup.room.viewers[1]?.away === true && setup.viewerLists.length === 2, "viewers updates the list");
+    setup.room.disconnect();
+    check(setup.viewerLists.at(-1)?.length === 0, "empty after leave");
+  }
+
+  console.log("[21] the microphone: offered after our own offer, muted until toggleMic, again on a new PeerConnection");
+  {
+    reset();
+    micResult = "grant";
+    micRequests = 0;
+    const setup = await joinedRoom([], { microphone: true });
+    await flush();
+    const offers = micOffers(setup.ws);
+    check(offers.length === 1 && offers[0].tracks[0].trackName === "microphone" && offers[0].tracks[0].mid === "mic-0", "microphone offer sent, with its mid");
+    check(setup.ws.requests("mute").at(-1)?.muted === true, "after mute: it starts muted");
+    check(setup.pc.micTransceiver?.direction === "sendonly", "the microphone is sendonly");
+    check(setup.pc.micTransceiver.sender.track.enabled === false, "and its track starts disabled");
+    setup.ws.receive({ answer: { sdp: "mic-answer" } });
+    await flush();
+    check(setup.pc.remote.at(-1)?.sdp === "mic-answer", "its answer applied");
+    setup.room.toggleMic(true);
+    check(setup.ws.requests("mute").at(-1)?.muted === false && setup.pc.micTransceiver.sender.track.enabled === true, "unmuting enables the track and tells the room");
+    setup.room.toggleMic(false);
+    check(setup.ws.requests("mute").at(-1)?.muted === true && setup.pc.micTransceiver.sender.track.enabled === false, "muting too");
+
+    setup.pc.setState("failed");
+    await flush();
+    const pc2 = FakePeer.all.at(-1)!;
+    setup.ws.receive({ answer: { sdp: "sfu-answer-2" } });
+    await flush();
+    pc2.setState("connected");
+    await flush();
+    check(micOffers(setup.ws).length === 2 && micRequests === 1, "offered again on the new PeerConnection, without asking the browser again");
+    const track = pc2.micTransceiver.sender.track;
+    setup.room.disconnect();
+    check(track.stopped === true, "disconnect gives the microphone back");
+  }
+
+  console.log("[22] other viewers' microphones are pulled, and their voices listed");
+  {
+    reset();
+    const setup = await joinedRoom([], {
+      viewers: [{ viewerId: "alice" }, { viewerId: "bob", microphone: true, microphoneGeneration: 1 }],
+    });
+    await flush();
+    check(JSON.stringify(setup.ws.requests("subscribe").at(-1)?.microphones) === JSON.stringify(["bob"]), "subscribe microphones: [bob]");
+    const tracks = [{ viewerId: "bob", trackName: "microphone", mid: "7", generation: 1 }];
+    setup.ws.receive({ offer: { sdp: "sfu-offer", tracks } });
+    await flush();
+    setup.pc.addTrack("7", "audio");
+    setup.ws.receive({ subscribed: { tracks, data: [] } });
+    await flush();
+    const bob = setup.room.viewers.find((viewer) => viewer.viewerId === "bob");
+    check(bob?.microphone === true && bob.stream?.getTracks()[0]?.kind === "audio", "bob's voice is on his entry");
+    check(setup.viewerLists.at(-1)?.find((viewer) => viewer.viewerId === "bob")?.stream !== undefined, "and onViewers reported it");
+    setup.ws.receive({ viewers: { viewers: [{ viewerId: "alice" }, { viewerId: "bob", microphone: false, microphoneGeneration: 1 }] } });
+    await flush();
+    check(JSON.stringify(setup.ws.requests("unsubscribe").at(-1)?.mids) === JSON.stringify(["7"]), "unsubscribed when bob stopped publishing");
+    setup.room.disconnect();
+  }
+
+  console.log("[23] a full room: the offer is rolled back, and this viewer only listens");
+  {
+    reset();
+    micResult = "grant";
+    const setup = await joinedRoom([], { microphone: true });
+    await flush();
+    setup.ws.receive({ error: { code: ErrorCode.ERROR_CODE_MICROPHONE_LIMIT, request: "offer", trackName: "microphone", message: "Room lab-a already has 10 microphones." } });
+    await flush();
+    check(setup.pc.rollbacks === 1 && setup.pc.micTransceiver.stopped === true, "rolled back, the transceiver stopped");
+    check(setup.errors.at(-1)?.code === "microphone_limit", "onError microphone_limit");
+    await advance(60_000);
+    check(micOffers(setup.ws).length === 1, "not offered again");
+    setup.room.disconnect();
+  }
+
+  console.log("[24] a microphone offer the SFU could not take is tried again later");
+  {
+    reset();
+    micResult = "grant";
+    const setup = await joinedRoom([], { microphone: true });
+    await flush();
+    setup.ws.receive({ error: { code: ErrorCode.ERROR_CODE_SFU, request: "offer", trackName: "microphone", message: "The SFU did not answer." } });
+    await flush();
+    check(setup.pc.rollbacks === 1, "rolled back");
+    await advance(1_900);
+    check(micOffers(setup.ws).length === 1, "not at once");
+    await advance(200);
+    check(micOffers(setup.ws).length === 2, "offered again after 2 s");
+    setup.room.disconnect();
+  }
+
+  console.log("[25] no microphone from the browser: onError, and the room goes on");
+  {
+    reset();
+    micResult = "deny";
+    const setup = await joinedRoom([device("cam", LIVE, 1)], { microphone: true });
+    await flush();
+    check(setup.errors.some((error) => error.code === "microphone"), "onError microphone");
+    check(micOffers(setup.ws).length === 0, "nothing offered");
+    check(setup.ws.requests("subscribe").length === 1, "the device is still subscribed");
+    micResult = "grant";
+    setup.room.disconnect();
+  }
+
+  console.log("[26] microphone: false never asks for it");
+  {
+    reset();
+    micRequests = 0;
+    const setup = await joinedRoom([]);
+    await flush();
+    check(micRequests === 0 && micOffers(setup.ws).length === 0, "no getUserMedia, no offer");
+    setup.room.disconnect();
+  }
+
+  console.log("[27] an answer the SFU did not take: a new PeerConnection and our own offer again");
+  {
+    reset();
+    const setup = await joinedRoom([device("cam", LIVE, 1)]);
+    setup.ws.receive({ offer: { sdp: "sfu-offer", tracks: [{ deviceId: "cam", trackName: "video", mid: "1", generation: 1 }] } });
+    await flush();
+    check(setup.ws.requests("answer").length === 1, "answered the SFU's offer");
+    setup.ws.receive({ error: { code: ErrorCode.ERROR_CODE_NO_OFFER, message: "There is no offer waiting for an answer.", request: "answer" } });
+    await flush();
+    check(FakePeer.all.length === 1, "no offer waiting: the same PeerConnection");
+    const offers = setup.ws.requests("offer").length;
+    setup.ws.receive({ error: { code: ErrorCode.ERROR_CODE_SFU, message: "Could not renegotiate.", request: "answer" } });
+    await flush();
+    check(FakePeer.all.length === 2 && setup.pc.connectionState === "closed", "the SFU failed: a new PeerConnection");
+    check(setup.ws.requests("offer").length === offers + 1, "and its own offer");
+    setup.room.disconnect();
+  }
+
+  console.log("[28] disconnect while the browser asks for the microphone: that one stops, the next connect asks once");
+  {
+    reset();
+    micRequests = 0;
+    micTracks.length = 0;
+    micHold = true;
+    const room = new CloudflareRoom({ apiUrl: "https://worker.test/sfu", apiKey: "viewer-key", roomId: "lab-a", microphone: true });
+    room.connect();
+    await flush();
+    room.disconnect();
+    room.connect();
+    await flush();
+    check(micRequests === 2, "asked again after connect");
+    for (const grant of heldMics.splice(0)) {
+      grant();
+    }
+    await flush();
+    check(micTracks[0]?.stopped === true, "the first, voided by disconnect, is stopped");
+    check(micTracks[1]?.stopped === false, "the second is kept");
+    micHold = false;
+    room.disconnect();
+    check(micTracks[1]?.stopped === true, "stopped on disconnect");
+  }
+
+  console.log("[29] members carry the newest device info");
+  {
+    reset();
+    const setup = await joinedRoom([device("cam", SLEEPING, 1)]);
+    setup.ws.receive({ members: { devices: [device("cam", LIVE, 2)] } });
+    await flush();
+    const cam = setup.devices().find((info) => info.deviceId === "cam");
+    check(cam?.state === "live" && cam?.generation === 2, "the list's info, not the one kept from before");
+    setup.room.disconnect();
+  }
+
+  console.log("[30] each token request has a secret: the same after a reconnect, and after a reload of the tab");
+  {
+    reset();
+    const storage = new Map<string, string>();
+    (globalThis as any).sessionStorage = { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value) };
+    const setup = await joinedRoom([]);
+    const secret = tokenRequests[0].body.secret;
+    check(typeof secret === "string" && secret.length >= 16, "a secret of 16 or more characters");
+    setup.ws.drop(1006);
+    await advance(2_000);
+    check(tokenRequests[1]?.body.secret === secret, "the same one after a reconnect");
+    setup.room.disconnect();
+    reset();
+    const reloaded = await joinedRoom([]);
+    check(tokenRequests[0].body.secret === secret, "the same one in a new room with this viewer id, from sessionStorage");
+    reloaded.room.disconnect();
+    delete (globalThis as any).sessionStorage;
+  }
+
+  console.log("[31] a live connection with another secret has this viewer id: the room closes");
+  {
+    reset();
+    const setup = await joinedRoom([]);
+    setup.ws.drop(CloseCode.CLOSE_CODE_ID_IN_USE);
+    await flush();
+    check(setup.errors.at(-1)?.code === "viewer_id_in_use", "onError viewer_id_in_use");
+    check(setup.statuses.at(-1) === "closed", "closed");
+    await advance(5_000);
+    check(tokenRequests.length === 1, "not tried again");
+  }
+
+  console.log("[32] the secret is kept only for a viewer id the app chose; the app can give its own");
+  {
+    reset();
+    const storage = new Map<string, string>();
+    (globalThis as any).sessionStorage = { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value) };
+    const options = { apiUrl: "https://worker.test/sfu", apiKey: "viewer-key", roomId: "lab-a", microphone: false };
+    const random = new CloudflareRoom(options);
+    random.connect();
+    await flush();
+    check(tokenRequests[0]?.body.secret.length >= 16 && storage.size === 0, "a random viewer id: a secret, not kept");
+    random.disconnect();
+
+    reset();
+    const own = new CloudflareRoom({ ...options, viewerId: "alice", secret: "kept-by-the-app-0123" });
+    own.connect();
+    await flush();
+    check(tokenRequests[0]?.body.secret === "kept-by-the-app-0123" && storage.size === 0, "the app's own secret, used as it is");
+    own.disconnect();
+
+    let refused = false;
+    try {
+      new CloudflareRoom({ ...options, secret: "too-short" });
+    } catch {
+      refused = true;
+    }
+    check(refused, "a secret under 16 characters throws");
+    delete (globalThis as any).sessionStorage;
+  }
+}
+
+main().then(() => {
+  if (failures > 0) {
+    console.log(`\n${failures} check(s) failed`);
+    process.exit(1);
+  }
+  console.log("\nall checks passed");
+  process.exit(0);
+});

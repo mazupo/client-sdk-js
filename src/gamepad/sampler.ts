@@ -1,10 +1,11 @@
+import type { Connection } from '../connection/connection';
+import type { SfuRoom, SfuRoomDevice, SfuRoomViewer } from '../connection/sfu-room';
 import { InputReport } from '../proto/input';
 import { toSnapshot } from './snapshot';
 import {
   ButtonEvent,
   GamepadSamplerOptions,
   GamepadSnapshot,
-  IpcSink,
   SuspendReason,
 } from './types';
 
@@ -27,7 +28,9 @@ export class GamepadSampler {
   private readonly endpoint: string;
   private readonly sampleWhileHidden: boolean;
 
-  private sink: IpcSink | null;
+  private readonly connection: Connection | null;
+  /** In a room: only these devices. Unset: wherever the connection's `sendText()` goes. */
+  private deviceIds?: string[];
   private timer: ReturnType<typeof setInterval> | null = null;
   private wanted = false;
 
@@ -46,7 +49,7 @@ export class GamepadSampler {
   private readonly buttonListeners = new Set<ButtonListener>();
 
   constructor(options: GamepadSamplerOptions = {}) {
-    this.sink = options.sink ?? null;
+    this.connection = options.connection ?? null;
     this.hz = options.hz && options.hz > 0 ? options.hz : DEFAULT_HZ;
     this.endpoint = options.endpoint ?? DEFAULT_ENDPOINT;
     this.sampleWhileHidden = options.sampleWhileHidden ?? false;
@@ -62,9 +65,9 @@ export class GamepadSampler {
     return this.timer !== null;
   }
 
-  /** Swap the destination without disturbing the loop. */
-  setSink(sink: IpcSink | null): void {
-    this.sink = sink;
+  /** @internal Where a room's gamepad goes; `room.gamepad({ deviceIds })` sets it. */
+  sendTo(deviceIds: string[] | undefined): void {
+    this.deviceIds = deviceIds;
   }
 
   /** Called with each reading, and with null when the pad goes away. */
@@ -215,11 +218,11 @@ export class GamepadSampler {
 
     const snapshot = toSnapshot(pad);
     this.latest = snapshot;
-    // Before the sink: local behaviour should not depend on there being a connection.
+    // Before sending: local behaviour should not depend on there being a connection.
     this.emitButtonChanges(snapshot.buttons);
     this.emitSnapshot(snapshot);
 
-    if (!this.sink) {
+    if (!this.connection) {
       return;
     }
 
@@ -235,14 +238,23 @@ export class GamepadSampler {
       return;
     }
 
-    if (this.sink.canSend?.('lossy') === false) {
-      return;
+    // Always lossy: a late reading is worse than a lost one, and the next comes within 1/hz.
+    const options = { endpoint: this.endpoint, sequence: this.sequence };
+    if (this.deviceIds) {
+      // Set only by a room's gamepad().
+      const room = this.connection as SfuRoom<SfuRoomDevice, SfuRoomViewer>;
+      const targets = this.deviceIds.filter((deviceId) => room.canSendTo(deviceId, 'lossy'));
+      if (targets.length === 0) {
+        return;
+      }
+      const data = this.encode(snapshot);
+      targets.forEach((deviceId) => room.sendDataTo(deviceId, data, 'lossy', options));
+    } else {
+      if (!this.connection.canSend('lossy')) {
+        return;
+      }
+      this.connection.sendToEndpoint(this.encode(snapshot), 'lossy', options);
     }
-
-    this.sink.sendToEndpoint(this.encode(snapshot), 'lossy', {
-      endpoint: this.endpoint,
-      sequence: this.sequence,
-    });
     this.sequence++;
   };
 

@@ -1,30 +1,78 @@
 import { RtcPeer, RtcPeerConfig } from "./rtc-peer";
 
-/**
- * The subscribe side of a Cloudflare Realtime SFU session.
- *
- * Cloudflare hands each pulled track over on its own transceiver rather than grouping them into
- * a stream per publisher, so the track name the SFU accepted — which the signaling client learns
- * from the /tracks/new response — is what identifies a stream here.
- */
+/** A cf-sfu-worker room's PeerConnection. The room decides when to offer, so this peer neither offers nor restarts ICE. */
 export class CloudflarePeer extends RtcPeer {
-  private midToTrackName = new Map<string, string>();
+  /** A track arrived. The room maps it to a device by its mid. */
+  onTrack?: (event: RTCTrackEvent) => void;
+
+  private microphone?: RTCRtpTransceiver;
 
   constructor(config: RtcPeerConfig) {
     super(config);
-    // Pulling remote tracks always makes the SFU the offerer, and there is no endpoint that takes
-    // an offer from this side, so a renegotiation started here would have nowhere to go.
-    this.peer.onnegotiationneeded = null;
-    console.debug("CloudflarePeer created.");
   }
 
-  /** Must be called before the offer carrying those mids is applied. */
-  setTrackNames(midToTrackName: Map<string, string>): void {
-    midToTrackName.forEach((name, mid) => this.midToTrackName.set(mid, name));
+  protected override restartsIce(): boolean {
+    return false;
   }
 
-  protected override getStreamKey(event: RTCTrackEvent): string {
-    const mid = event.transceiver.mid;
-    return (mid ? this.midToTrackName.get(mid) : undefined) ?? mid ?? event.track.id;
+  protected override onNegotiationNeeded(): void {
+  }
+
+  protected override handleTrack(event: RTCTrackEvent): void {
+    this.applyJitterBufferTarget(event.receiver);
+    if (event.track.kind === "audio") {
+      event.track.enabled = this.options.isSpeakerOn ?? true;
+    }
+    this.onTrack?.(event);
+  }
+
+  /** Our own offer, set as the local description. */
+  async offer(): Promise<string> {
+    await this.peer.setLocalDescription(await this.peer.createOffer());
+    return this.peer.localDescription?.sdp ?? "";
+  }
+
+  /** Answers the SFU's offer. */
+  async answer(sdp: string): Promise<string> {
+    await this.peer.setRemoteDescription({ type: "offer", sdp });
+    const answer = await this.peer.createAnswer();
+    await this.peer.setLocalDescription(answer);
+    return answer.sdp ?? "";
+  }
+
+  /** The SFU's answer to our own offer. */
+  async applyAnswer(sdp: string): Promise<void> {
+    await this.peer.setRemoteDescription({ type: "answer", sdp });
+  }
+
+  /** A channel negotiated on the id the worker gave, or `server-events` on id 0. */
+  openChannel(label: string, id: number, init: RTCDataChannelInit = {}): RTCDataChannel {
+    const channel = this.peer.createDataChannel(label, { ...init, negotiated: true, id });
+    channel.binaryType = "arraybuffer";
+    return channel;
+  }
+
+  transceivers(): RTCRtpTransceiver[] {
+    return this.peer.getTransceivers();
+  }
+
+  get signalingState(): RTCSignalingState {
+    return this.peer.signalingState;
+  }
+
+  /** Our own offer with the microphone added, sendonly. Returns it with the microphone's mid. */
+  async offerMicrophone(track: MediaStreamTrack, stream: MediaStream): Promise<{ sdp: string; mid: string }> {
+    this.microphone = this.peer.addTransceiver(track, { direction: "sendonly", streams: [stream] });
+    await this.peer.setLocalDescription(await this.peer.createOffer());
+    return { sdp: this.peer.localDescription?.sdp ?? "", mid: this.microphone.mid ?? "" };
+  }
+
+  /** Takes back a microphone offer the worker refused. */
+  async rollbackMicrophone(): Promise<void> {
+    if (this.peer.signalingState === "have-local-offer") {
+      await this.peer.setLocalDescription({ type: "rollback" });
+    }
+    this.microphone?.stop();
+    this.microphone = undefined;
   }
 }

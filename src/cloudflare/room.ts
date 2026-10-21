@@ -1,0 +1,1171 @@
+import {
+  CloseCode,
+  DataSubscription,
+  DeepPartial,
+  DeviceInfo,
+  DeviceState,
+  ErrorCode,
+  IceServer,
+  SignalError,
+  Subscribe,
+  SubscribeOffer,
+  Subscription,
+  Unsubscribe,
+  ViewerInfo,
+  ViewerRef,
+} from '../proto/cloudflare';
+import { Packet } from '../proto/packet';
+import { SfuRoom } from '../connection/sfu-room';
+import { CloudflarePeer } from '../peer/cloudflare-peer';
+import { ChannelRole, IpcMode, IpcOptions, roleInit, RtcPeer } from '../peer/rtc-peer';
+import { IpcReceiver } from '../rtc/ipc-receiver';
+import { sendIpc } from '../rtc/ipc-sender';
+import { generateRequestId } from '../utils/rtc-tools';
+import {
+  ResponseFrame,
+  TokenError,
+  errorName,
+  openSocket,
+  parseResponse,
+  requestToken,
+  sendRequest,
+  stateName,
+} from './socket';
+import {
+  CloudflareRoomOptions,
+  RoomControl,
+  RoomDevice,
+  RoomViewer,
+  RoomViewerInfo,
+} from './types';
+
+/** The track name of a viewer's microphone, in the offer that publishes it. */
+const MICROPHONE_TRACK = 'microphone';
+/** Where a tab keeps the secret of each viewer id, followed by the id. */
+const SECRET_KEY = '@mazupo/client:cloudflare-secret:';
+
+const LIVE = DeviceState.DEVICE_STATE_LIVE;
+
+/** Refusals that do not change for the same publication. Not asked for again. */
+const PERMANENT = new Set([
+  ErrorCode.ERROR_CODE_VIEWER_LIMIT,
+  ErrorCode.ERROR_CODE_NOT_MEMBER,
+  ErrorCode.ERROR_CODE_TRACK_NOT_FOUND,
+  ErrorCode.ERROR_CODE_NO_DATA_CHANNELS,
+]);
+
+/** Once a device is live the SFU is reachable; the PeerConnection gets this long to connect. */
+const CONNECT_GRACE_MS = 4_000;
+
+/** The delivery every end of a device's channels uses. */
+const CHANNEL_INIT: Record<string, RTCDataChannelInit> = {
+  _lossy: roleInit(ChannelRole.Lossy),
+  _reliable: roleInit(ChannelRole.Reliable),
+};
+
+type Timer = ReturnType<typeof setTimeout>;
+
+/** When to ask for a device again after a failed subscribe. */
+interface Retry {
+  generation: number;
+  count: number;
+  at: number;
+}
+
+/** A device's channels in our PeerConnection. */
+interface DataChannels {
+  generation: number;
+  /** "label:id,…", to see when the worker moved them. */
+  ids: string;
+  canReply: boolean;
+  channels: Map<string, RTCDataChannel>;
+  receivers: IpcReceiver[];
+}
+
+function backoff(attempt: number): number {
+  return Math.min(30_000, 1000 * 2 ** attempt) + Math.random() * 500;
+}
+
+function sameViewer(a: ViewerRef | undefined, b: ViewerRef | null): boolean {
+  return Boolean(a && b && a.room === b.room && a.viewerId === b.viewerId);
+}
+
+function viewer(ref: ViewerRef | undefined): RoomViewer | undefined {
+  return ref ? { room: ref.room, viewerId: ref.viewerId } : undefined;
+}
+
+/** The secret this tab keeps for an app-chosen viewer id, so a reload resumes. Without sessionStorage, give `secret`. */
+function viewerSecret(viewerId: string): string {
+  const key = `${SECRET_KEY}${viewerId}`;
+  try {
+    const kept = globalThis.sessionStorage?.getItem(key);
+    if (kept) {
+      return kept;
+    }
+    const secret = generateRequestId();
+    globalThis.sessionStorage?.setItem(key, secret);
+    return secret;
+  } catch {
+    return generateRequestId(); // storage blocked
+  }
+}
+
+function rtcIceServer(server: IceServer): RTCIceServer {
+  return {
+    urls: server.urls,
+    ...(server.username ? { username: server.username } : {}),
+    ...(server.credential ? { credential: server.credential } : {}),
+  };
+}
+
+/**
+ * Watches every device in one room of a cf-sfu-worker, through one WebSocket and one PeerConnection.
+ * With `ipc`, each device's channels open and the viewer in control can send to it.
+ * With `microphone` (the default), viewers talk to each other. It reconnects until `disconnect()`.
+ */
+export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
+  private readonly apiUrl: string;
+  private readonly apiKey: string;
+  private readonly ipc: boolean;
+  private readonly microphone: boolean;
+  /** Sent with each token request: only it can resume or replace this viewer. */
+  private readonly secret: string;
+
+  /** The microphone, once the browser gave it. Kept across PeerConnections. */
+  private micStream?: MediaStream;
+  /** Counts microphone requests; `disconnect()` voids the one still pending. */
+  private micAsk = 0;
+  /** The browser is asking for the microphone. */
+  private micAsking = false;
+  /** The browser or the room refused it: this viewer only listens. */
+  private micBlocked = false;
+  /** Our microphone offer waits for its answer. */
+  private micPending = false;
+  /** Whether that offer said muted, to send a change made meanwhile. */
+  private micOfferMuted = true;
+  /** The current PeerConnection publishes our microphone. */
+  private micPublished = false;
+  private micFailures = 0;
+  private micRetryAt = 0;
+
+  /** The one socket in use. Events from older sockets are ignored. */
+  private socket: WebSocket | null = null;
+  private connectSeq = 0;
+  private reconnectTimer?: Timer;
+  private syncTimer?: Timer;
+  private rebuildTimer?: Timer;
+  private connectCheck?: Timer;
+  private peer: CloudflarePeer | null = null;
+  private iceServers: RTCIceServer[] = [];
+  private leaving = true;
+  private attempt = 0;
+  /** Who this viewer is in the room, once joined. */
+  private me: ViewerRef | null = null;
+  /** Frames are handled one at a time, in order. */
+  private inbox: Promise<void> = Promise.resolve();
+
+  /** True from sending subscribe or unsubscribe until the worker answers. */
+  private busy = false;
+  /** What the request in flight asks for, so per-device errors go to the right retry list. */
+  private pending: 'tracks' | 'data' | 'microphones' = 'tracks';
+  private busyFailures = 0;
+  /** Our offers without an answer yet. Only the last one's answer applies, and subscribing waits for it. */
+  private ownOffers = 0;
+  /** Own offers in a row the worker could not take, for the backoff. */
+  private offerFailures = 0;
+  /** A new PeerConnection after a session reset sends its own offer again. */
+  private offerDue = false;
+
+  private readonly infos = new Map<string, DeviceInfo>();
+  private viewerInfos: ViewerInfo[] = [];
+  private readonly subscriptions = new Map<string, Subscription>(); // by mid
+  private readonly dataSubs = new Map<string, DataChannels>(); // by device id
+  private readonly refused = new Map<string, { generation: number; code: ErrorCode }>();
+  private readonly retries = new Map<string, Retry>();
+  private readonly dataRetries = new Map<string, Retry>();
+  /** Other viewers' microphones that failed, by viewer id. */
+  private readonly micRetries = new Map<string, Retry>();
+  private readonly streams = new Map<string, MediaStream>();
+  /** Other viewers' voices, by viewer id. */
+  private readonly viewerStreams = new Map<string, MediaStream>();
+  /** takeControl() calls that wait for the device's channels to open. */
+  private readonly pendingTakes = new Set<string>();
+  private emitQueued = false;
+
+  constructor(options: CloudflareRoomOptions) {
+    super(options, { timeout: 0, isMicOn: false });
+    if (!options.apiUrl || !options.apiKey) {
+      throw new Error('CloudflareRoom needs apiUrl and apiKey.');
+    }
+    this.apiUrl = options.apiUrl;
+    this.apiKey = options.apiKey;
+    this.ipc = options.ipc ?? false;
+    this.microphone = options.microphone ?? true;
+    // A random id is not reused after a reload, so its secret is not kept.
+    this.secret = options.secret ?? (options.viewerId?.trim() ? viewerSecret(this.viewerId) : generateRequestId());
+    if (this.secret.length < 16) {
+      throw new Error('CloudflareRoom needs a secret of at least 16 characters.');
+    }
+  }
+
+  /** The devices in the room, as `onDevices` last reported them. */
+  get devices(): RoomDevice[] {
+    return [...this.infos.values()].map((info) => this.snapshot(info));
+  }
+
+  /** The viewers in the room, as `onViewers` last reported them. */
+  get viewers(): RoomViewerInfo[] {
+    return this.viewerInfos.map((info) => {
+      const me = info.viewerId === this.me?.viewerId;
+      return {
+        viewerId: info.viewerId,
+        ipc: info.dataChannels,
+        away: info.away,
+        me,
+        microphone: info.microphone,
+        muted: info.muted,
+        stream: me ? undefined : this.viewerStreams.get(info.viewerId),
+      };
+    });
+  }
+
+  /** Joins the room. */
+  protected open(): void {
+    this.attempt = 0;
+    void this.join();
+    if (this.microphone && !this.micStream && !this.micBlocked && !this.micAsking) {
+      void this.getMicrophone();
+    }
+  }
+
+  /** Mutes or unmutes this viewer's microphone, and tells the room. */
+  override toggleMic(enabled: boolean = !this.isMicOn): void {
+    super.toggleMic(enabled);
+    this.micStream?.getAudioTracks().forEach((track) => (track.enabled = enabled));
+    if (this.micPublished) {
+      sendRequest(this.socket, 'mute', { muted: !enabled });
+    }
+  }
+
+  /** Leaves the room, so the device can sleep if nobody else watches. */
+  protected close(): void {
+    this.shutDown(true);
+  }
+
+  /** Controls the device if nobody does, or waits in line. Needs `ipc`. Waits here until our channels to it are open. */
+  takeControl = (deviceId: string) => {
+    if (!this.ipc) {
+      console.warn('takeControl needs a CloudflareRoom with ipc: true.');
+      return;
+    }
+    if (this.dataSubs.get(deviceId)?.channels.get('_reliable')?.readyState === 'open') {
+      sendRequest(this.socket, 'takeControl', { deviceId });
+    } else {
+      this.pendingTakes.add(deviceId);
+    }
+  }
+
+  /** Gives up control, a takeover or a place in line. */
+  releaseControl = (deviceId: string) => {
+    if (this.pendingTakes.delete(deviceId)) {
+      return; // never sent
+    }
+    sendRequest(this.socket, 'releaseControl', { deviceId });
+  }
+
+  /** Sends to the devices this viewer controls, or only to `deviceIds`. */
+  protected deliver(data: Uint8Array, mode: IpcMode, options?: IpcOptions, deviceIds?: string[]): boolean {
+    const targets = this.targets(mode, deviceIds);
+    if (targets.length === 0) {
+      if (deviceIds) {
+        console.warn(`Cannot send to ${deviceIds.join(', ')}: this viewer does not control it, or its channel is not open.`);
+      }
+      return false;
+    }
+    for (const deviceId of targets) {
+      sendIpc(this.dataSubs.get(deviceId)?.channels.get(`_${mode}`), data, mode, options);
+    }
+    return true;
+  }
+
+  protected deliverable(mode: IpcMode, deviceIds?: string[]): boolean {
+    return this.targets(mode, deviceIds).length > 0;
+  }
+
+  protected peers(): RtcPeer[] {
+    return this.peer ? [this.peer] : [];
+  }
+
+  /** The devices a message would reach: those this viewer controls, with the channel open. */
+  private targets(mode: IpcMode, deviceIds?: string[]): string[] {
+    return (deviceIds ?? [...this.dataSubs.keys()]).filter((deviceId) => this.controls(deviceId, mode));
+  }
+
+  /** Whether a message sent to the device right now would reach it. */
+  private controls(deviceId: string, mode: IpcMode): boolean {
+    const data = this.dataSubs.get(deviceId);
+    const info = this.infos.get(deviceId);
+    return Boolean(
+      data?.canReply &&
+      sameViewer(info?.controller, this.me) &&
+      data.channels.get(`_${mode}`)?.readyState === 'open'
+    );
+  }
+
+  private setViewers(viewers: ViewerInfo[]) {
+    if (this.viewerInfos.length === 0 && viewers.length === 0) {
+      return;
+    }
+    this.viewerInfos = viewers;
+    this.onViewers?.(this.viewers);
+  }
+
+  /** Reports the device list once, after the current burst of changes. */
+  private changed() {
+    if (this.emitQueued) {
+      return;
+    }
+    this.emitQueued = true;
+    void Promise.resolve().then(() => {
+      this.emitQueued = false;
+      this.onDevices?.(this.devices);
+    });
+  }
+
+  private async join(): Promise<void> {
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = undefined;
+    this.dropSocket();
+    const seq = ++this.connectSeq;
+    this.leaving = false;
+    try {
+      const { token, url } = await requestToken(this.apiUrl, this.apiKey, {
+        viewer_id: this.viewerId,
+        room_id: this.roomId,
+        can_subscribe: true,
+        secret: this.secret,
+        ...(this.ipc ? { data_channels: true as const } : {}),
+      });
+      if (seq !== this.connectSeq || this.leaving) {
+        return;
+      }
+      const ws = openSocket(url, token);
+      this.socket = ws;
+      ws.addEventListener('message', (event) => {
+        if (ws !== this.socket) {
+          return;
+        }
+        const frame = parseResponse(event.data);
+        if (frame) {
+          this.inbox = this.inbox.then(() => this.handle(frame)).catch((err) => {
+            console.error('CloudflareRoom: handling a message failed =>', err);
+          });
+        }
+      });
+      ws.addEventListener('close', (event) => {
+        if (ws === this.socket) {
+          this.onClose(event);
+        }
+      });
+    } catch (error) {
+      if (seq !== this.connectSeq) {
+        return;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      if (error instanceof TokenError && error.permanent) {
+        // A wrong key or a refused request: asking again gets the same answer.
+        this.fail({ code: 'token', message });
+        return;
+      }
+      this.emitError({ code: 'token', message });
+      this.scheduleReconnect();
+    }
+  }
+
+  private dropSocket() {
+    const old = this.socket;
+    this.socket = null;
+    old?.close(1000, 'closed by the viewer');
+  }
+
+  /** Stops everything. The device list empties. */
+  private shutDown(sendLeave: boolean) {
+    this.leaving = true;
+    this.connectSeq++;
+    clearTimeout(this.reconnectTimer);
+    clearTimeout(this.syncTimer);
+    clearTimeout(this.rebuildTimer);
+    clearTimeout(this.connectCheck);
+    this.reconnectTimer = undefined;
+    this.connectCheck = undefined;
+    this.ownOffers = 0;
+    this.offerFailures = 0;
+    this.offerDue = false;
+    this.busy = false;
+    if (sendLeave) {
+      sendRequest(this.socket, 'leave');
+    }
+    this.dropSocket();
+    this.resetPeer(false);
+    this.infos.clear();
+    this.refused.clear();
+    this.retries.clear();
+    this.dataRetries.clear();
+    this.micRetries.clear();
+    this.pendingTakes.clear();
+    this.micStream?.getTracks().forEach((track) => track.stop());
+    this.micStream = undefined;
+    this.micAsk++;
+    this.micAsking = false;
+    this.micBlocked = false;
+    this.micFailures = 0;
+    this.micRetryAt = 0;
+    this.me = null;
+    this.changed();
+    this.setViewers([]);
+  }
+
+  private onClose(event: CloseEvent) {
+    this.socket = null;
+    this.busy = false;
+    if (this.leaving) {
+      return;
+    }
+    if (event.code === CloseCode.CLOSE_CODE_REPLACED) {
+      this.shutDown(false);
+      this.emitError({ code: 'replaced', message: 'Another connection joined the room with this viewer id.' });
+      this.closed();
+      return;
+    }
+    if (event.code === CloseCode.CLOSE_CODE_ID_IN_USE) {
+      this.shutDown(false);
+      this.emitError({ code: 'viewer_id_in_use', message: 'Someone else is in the room with this viewer id. Use another one, or connect again later.' });
+      this.closed();
+      return;
+    }
+    this.scheduleReconnect();
+  }
+
+  private scheduleReconnect() {
+    if (this.leaving || this.reconnectTimer) {
+      return;
+    }
+    this.setStatus('reconnecting');
+    // The same viewer id within 30 s resumes the subscriptions on the worker.
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
+      if (!this.leaving) {
+        void this.join();
+      }
+    }, backoff(this.attempt++));
+  }
+
+  private async handle(frame: ResponseFrame): Promise<void> {
+    switch (frame.action) {
+      case 'joined': {
+        const message = frame.message;
+        this.attempt = 0;
+        this.iceServers = message.iceServers.map(rtcIceServer);
+        this.me = { room: message.room, viewerId: message.viewerId };
+        // An answer to an offer sent on the old socket is lost. Start over.
+        if (!message.resumed || !this.peer || this.ownOffers > 0) {
+          this.ownOffers = 0;
+          this.resetPeer(true);
+          void this.connectEarly();
+        } else {
+          this.setSubscriptions(message.subscriptions);
+          this.setData(message.data);
+        }
+        this.infos.clear();
+        for (const info of message.devices) {
+          this.infos.set(info.deviceId, info);
+        }
+        this.setViewers(message.viewers);
+        this.busy = false;
+        this.setStatus('connected');
+        this.changed();
+        this.sync();
+        break;
+      }
+      case 'device':
+        this.infos.set(frame.message.deviceId, frame.message);
+        if (frame.message.state === LIVE) {
+          this.checkConnects();
+        }
+        this.changed();
+        this.sync();
+        break;
+      case 'members': {
+        // Frames come in order, so this list is newer than any device message before it.
+        const next = new Map(frame.message.devices.map((info) => [info.deviceId, info]));
+        this.infos.clear();
+        for (const [id, info] of next) {
+          this.infos.set(id, info);
+        }
+        // A device that left counts its generations from 1 again.
+        for (const list of [this.refused, this.retries, this.dataRetries, this.pendingTakes]) {
+          for (const id of [...list.keys()]) {
+            if (!this.infos.has(id)) {
+              list.delete(id);
+            }
+          }
+        }
+        for (const id of [...this.dataSubs.keys()]) {
+          if (!this.infos.has(id)) {
+            this.closeChannels(id);
+          }
+        }
+        this.changed();
+        this.sync();
+        break;
+      }
+      case 'viewers':
+        this.setViewers(frame.message.viewers);
+        // Someone started or stopped publishing a microphone.
+        this.sync();
+        break;
+      case 'offer':
+        await this.onOffer(frame.message);
+        break;
+      case 'answer': {
+        this.ownOffers = Math.max(0, this.ownOffers - 1);
+        // The answer to an offer from a PeerConnection we replaced since.
+        const peer = this.peer;
+        if (this.ownOffers > 0 || !peer) {
+          break;
+        }
+        this.offerFailures = 0;
+        try {
+          await peer.applyAnswer(frame.message.sdp);
+        } catch (err) {
+          console.warn('CloudflareRoom: the SFU answer did not apply, starting over =>', err);
+          this.rebuildPeer();
+          break;
+        }
+        if (this.micPending) {
+          this.micPending = false;
+          this.micPublished = true;
+          this.micFailures = 0;
+          // Muted or unmuted while the offer waited.
+          if (this.micOfferMuted !== !this.isMicOn) {
+            sendRequest(this.socket, 'mute', { muted: !this.isMicOn });
+          }
+        }
+        this.sync();
+        break;
+      }
+      case 'subscribed': {
+        // About the session our pending offer replaces.
+        if (this.ownOffers > 0) {
+          break;
+        }
+        const message = frame.message;
+        this.setSubscriptions(message.tracks);
+        this.setData(message.data);
+        for (const sub of message.tracks) {
+          if (sub.viewerId) {
+            this.micRetries.delete(sub.viewerId);
+          } else {
+            this.retries.delete(sub.deviceId);
+          }
+        }
+        for (const sub of message.data) {
+          this.dataRetries.delete(sub.deviceId);
+        }
+        this.busy = false;
+        this.busyFailures = 0;
+        this.attachTracks();
+        if (this.offerDue) {
+          this.offerDue = false;
+          void this.connectEarly();
+        }
+        this.changed();
+        this.sync();
+        break;
+      }
+      case 'error':
+        this.onSignalError(frame.message);
+        break;
+    }
+  }
+
+  private onSignalError(error: SignalError) {
+    if (error.code === ErrorCode.ERROR_CODE_VIEWER_GONE) {
+      // The worker forgot this viewer. Join again from the start.
+      this.dropSocket();
+      this.resetPeer(false);
+      this.ownOffers = 0;
+      this.busy = false;
+      this.scheduleReconnect();
+      return;
+    }
+
+    if (error.request === 'offer' && error.trackName === MICROPHONE_TRACK) {
+      this.ownOffers = Math.max(0, this.ownOffers - 1);
+      this.micPending = false;
+      const peer = this.peer;
+      void peer?.rollbackMicrophone().finally(() => {
+        if (peer === this.peer) {
+          this.sync();
+        }
+      });
+      if (error.code === ErrorCode.ERROR_CODE_MICROPHONE_LIMIT) {
+        this.micBlocked = true;
+        this.emitError({ code: 'microphone_limit', message: error.message });
+      } else {
+        // e.g. the SFU did not answer. Try again in a while.
+        this.micFailures++;
+        this.micRetryAt = Date.now() + Math.min(30_000, 1000 * 2 ** this.micFailures);
+        this.scheduleSync(this.micRetryAt - Date.now());
+      }
+      return;
+    }
+
+    if (error.viewerId && error.request === 'subscribe') {
+      // Usually the viewer stopped publishing meanwhile. Ask again soon if it still does.
+      const generation = this.viewerInfos.find((info) => info.viewerId === error.viewerId)?.microphoneGeneration ?? 0;
+      const previous = this.micRetries.get(error.viewerId);
+      const count = previous?.generation === generation ? previous.count + 1 : 0;
+      this.micRetries.set(error.viewerId, { generation, count, at: Date.now() + Math.min(10_000, 1000 * 2 ** count) });
+      return;
+    }
+
+    if (error.deviceId && error.request === 'subscribe') {
+      // The worker still finishes the request for the other devices.
+      const generation = this.infos.get(error.deviceId)?.generation ?? 0;
+      if (PERMANENT.has(error.code) && this.pending !== 'data') {
+        this.refused.set(error.deviceId, { generation, code: error.code });
+      } else {
+        // Usually the device is still connecting. Ask again in a moment.
+        const list = this.pending === 'data' ? this.dataRetries : this.retries;
+        const previous = list.get(error.deviceId);
+        const count = previous?.generation === generation ? previous.count + 1 : 0;
+        const at = PERMANENT.has(error.code) ? Infinity : Date.now() + Math.min(10_000, 1000 * 2 ** count);
+        list.set(error.deviceId, { generation, count, at });
+      }
+      this.changed();
+      return;
+    }
+
+    if (error.request === 'offer') {
+      this.ownOffers = Math.max(0, this.ownOffers - 1);
+      if (this.ownOffers > 0) {
+        return;
+      }
+      // The worker could not take our offer, e.g. the SFU did not answer. Start over in a moment.
+      this.offerFailures++;
+      clearTimeout(this.rebuildTimer);
+      this.rebuildTimer = setTimeout(() => this.rebuildPeer(), Math.min(10_000, 1000 * 2 ** this.offerFailures));
+      return;
+    }
+
+    if (error.request === 'answer' && error.code !== ErrorCode.ERROR_CODE_NO_OFFER) {
+      // The SFU did not take our answer, so its session and our PeerConnection disagree. Start over.
+      this.rebuildPeer();
+      return;
+    }
+
+    if (['subscribe', 'unsubscribe', 'answer'].includes(error.request)) {
+      this.busy = false;
+      this.busyFailures++;
+      this.scheduleSync(Math.min(10_000, 1000 * 2 ** this.busyFailures));
+      return;
+    }
+
+    // take_control, release_control, control_ready, and anything else worth showing.
+    this.emitError({
+      code: errorName(error.code),
+      message: error.message,
+      ...(error.deviceId ? { deviceId: error.deviceId } : {}),
+    });
+  }
+
+  private async onOffer(message: SubscribeOffer): Promise<void> {
+    // For the PeerConnection our pending offer replaces.
+    if (this.ownOffers > 0) {
+      return;
+    }
+    if (message.sessionReset) {
+      this.resetPeer(true);
+      this.offerDue = true;
+    }
+    const peer = this.peer;
+    if (!peer) {
+      return;
+    }
+    this.setSubscriptions(message.tracks);
+    try {
+      sendRequest(this.socket, 'answer', { sdp: await peer.answer(message.sdp) });
+    } catch (err) {
+      console.warn('CloudflareRoom: the SFU offer did not apply, starting over =>', err);
+      this.rebuildPeer();
+      return;
+    }
+    this.attachTracks();
+  }
+
+  /** Connects with our own offer (m=application) while the devices wake. Tracks come with the SFU's offers. */
+  private async connectEarly(): Promise<void> {
+    const peer = this.peer;
+    if (!peer) {
+      return;
+    }
+    this.ownOffers += 1;
+    let sdp: string;
+    try {
+      peer.openChannel('server-events', 0);
+      sdp = await peer.offer();
+    } catch (err) {
+      this.ownOffers = Math.max(0, this.ownOffers - 1);
+      console.warn('CloudflareRoom: could not create an offer =>', err);
+      return;
+    }
+    if (peer !== this.peer || this.socket?.readyState !== WebSocket.OPEN) {
+      this.ownOffers = Math.max(0, this.ownOffers - 1); // replaced or disconnected meanwhile: not sent
+      return;
+    }
+    sendRequest(this.socket, 'offer', { sdp });
+  }
+
+  /** A device is live, so the SFU is reachable. A PeerConnection made during an outage may never connect. */
+  private checkConnects() {
+    if (this.connectCheck || !this.peer || this.peer.connectionState === 'connected') {
+      return;
+    }
+    const peer = this.peer;
+    this.connectCheck = setTimeout(() => {
+      this.connectCheck = undefined;
+      if (peer === this.peer && this.ownOffers === 0 && peer.connectionState !== 'connected') {
+        this.rebuildPeer();
+      }
+    }, CONNECT_GRACE_MS);
+  }
+
+  /** A new PeerConnection after the last one failed: a new SFU session, then we subscribe again. Control stays. */
+  private rebuildPeer() {
+    clearTimeout(this.rebuildTimer);
+    clearTimeout(this.connectCheck);
+    this.connectCheck = undefined;
+    this.busy = false;
+    this.offerDue = false;
+    if (this.leaving) {
+      return;
+    }
+    if (this.socket?.readyState !== WebSocket.OPEN) {
+      this.resetPeer(false); // joined starts over
+      return;
+    }
+    console.debug('CloudflareRoom: starting over with a new PeerConnection.');
+    this.resetPeer(true);
+    void this.connectEarly();
+  }
+
+  private scheduleSync(delay: number) {
+    clearTimeout(this.syncTimer);
+    this.syncTimer = setTimeout(() => this.sync(), delay);
+  }
+
+  /** Brings the subscriptions in line with the live devices. One request at a time. */
+  private sync() {
+    // The SFU holds a subscribe until the PeerConnection connects, which would hold up a new offer.
+    if (this.busy || this.ownOffers > 0 || this.peer?.connectionState !== 'connected' || this.socket?.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    // Tracks from a publication that ended: the device slept, restarted or left, or the viewer's microphone stopped.
+    const stale = [...this.subscriptions].filter(([, sub]) => {
+      if (sub.viewerId) {
+        const speaker = this.viewerInfos.find((info) => info.viewerId === sub.viewerId);
+        return !speaker?.microphone || speaker.microphoneGeneration !== sub.generation;
+      }
+      const info = this.infos.get(sub.deviceId);
+      return !info || info.state !== LIVE || info.generation !== sub.generation;
+    });
+    if (stale.length > 0) {
+      this.send('tracks', 'unsubscribe', { mids: stale.map(([mid]) => mid) });
+      return;
+    }
+
+    const now = Date.now();
+    let nextRetry = Infinity;
+    const due = (list: Map<string, Retry>, info: DeviceInfo) => {
+      const retry = list.get(info.deviceId);
+      if (!retry || retry.generation !== info.generation || retry.at <= now) {
+        return true;
+      }
+      nextRetry = Math.min(nextRetry, retry.at);
+      return false;
+    };
+
+    const wanted: { deviceId: string; trackName: string }[] = [];
+    for (const info of this.infos.values()) {
+      if (info.state !== LIVE || this.refused.get(info.deviceId)?.generation === info.generation || !due(this.retries, info)) {
+        continue;
+      }
+      for (const trackName of info.tracks) {
+        const has = [...this.subscriptions.values()].some(
+          (sub) => sub.deviceId === info.deviceId && sub.trackName === trackName && sub.generation === info.generation,
+        );
+        if (!has) {
+          wanted.push({ deviceId: info.deviceId, trackName });
+        }
+      }
+    }
+    if (wanted.length > 0) {
+      this.send('tracks', 'subscribe', { tracks: wanted });
+      return;
+    }
+
+    // Data channels come after the media, so they never hold up the first picture. Subscribing again keeps control.
+    if (this.ipc) {
+      const wantedData: string[] = [];
+      for (const info of this.infos.values()) {
+        if (info.state !== LIVE || !info.dataChannels || !due(this.dataRetries, info)) {
+          continue;
+        }
+        const current = this.dataSubs.get(info.deviceId);
+        if (current?.generation === info.generation) {
+          continue;
+        }
+        // Close the old channels now, so their ids are free for the new ones.
+        if (current) {
+          this.closeChannels(info.deviceId);
+        }
+        wantedData.push(info.deviceId);
+      }
+      if (wantedData.length > 0) {
+        this.send('data', 'subscribe', { data: wantedData });
+        return;
+      }
+    }
+
+    // The other viewers' voices, after the devices.
+    const wantedMics: string[] = [];
+    for (const info of this.viewerInfos) {
+      if (!info.microphone || info.viewerId === this.me?.viewerId) {
+        continue;
+      }
+      const has = [...this.subscriptions.values()].some(
+        (sub) => sub.viewerId === info.viewerId && sub.generation === info.microphoneGeneration,
+      );
+      const retry = this.micRetries.get(info.viewerId);
+      if (has) {
+        continue;
+      }
+      if (retry && retry.generation === info.microphoneGeneration && retry.at > now) {
+        nextRetry = Math.min(nextRetry, retry.at);
+        continue;
+      }
+      wantedMics.push(info.viewerId);
+    }
+    if (wantedMics.length > 0) {
+      this.send('microphones', 'subscribe', { microphones: wantedMics });
+      return;
+    }
+
+    // Our own microphone comes last: it waits for the browser and never holds up the picture.
+    if (this.micStream && !this.micBlocked && !this.micPending && !this.micPublished && this.peer?.signalingState === 'stable') {
+      if (this.micRetryAt <= now) {
+        void this.publishMicrophone();
+        return;
+      }
+      nextRetry = Math.min(nextRetry, this.micRetryAt);
+    }
+    if (nextRetry !== Infinity) {
+      this.scheduleSync(nextRetry - now);
+    }
+  }
+
+  /** Asks the browser for the microphone, muted until `toggleMic()`. Without it, the viewer only listens. */
+  private async getMicrophone(): Promise<void> {
+    const ask = ++this.micAsk;
+    this.micAsking = true;
+    let stream: MediaStream;
+    try {
+      if (!globalThis.navigator?.mediaDevices?.getUserMedia) {
+        throw new Error('this browser cannot capture audio');
+      }
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        video: false,
+      });
+    } catch (err) {
+      if (ask === this.micAsk) {
+        this.micAsking = false;
+        this.micBlocked = true;
+        this.emitError({ code: 'microphone', message: `No microphone, so you can only listen: ${err instanceof Error ? err.message : String(err)}` });
+      }
+      return;
+    }
+    if (ask !== this.micAsk) {
+      // disconnect() came while the browser asked: nothing else would stop these tracks.
+      stream.getTracks().forEach((track) => track.stop());
+      return;
+    }
+    this.micAsking = false;
+    stream.getAudioTracks().forEach((track) => (track.enabled = this.isMicOn));
+    this.micStream = stream;
+    this.sync();
+  }
+
+  /** Publishes the microphone on the current PeerConnection with our own offer. */
+  private async publishMicrophone(): Promise<void> {
+    const peer = this.peer;
+    const stream = this.micStream;
+    const track = stream?.getAudioTracks()[0];
+    if (!peer || !stream || !track) {
+      return;
+    }
+    this.micPending = true;
+    this.ownOffers += 1;
+    let offer: { sdp: string; mid: string };
+    try {
+      offer = await peer.offerMicrophone(track, stream);
+    } catch (err) {
+      this.ownOffers = Math.max(0, this.ownOffers - 1);
+      this.micPending = false;
+      console.warn('CloudflareRoom: could not offer the microphone =>', err);
+      return;
+    }
+    if (peer !== this.peer || this.socket?.readyState !== WebSocket.OPEN) {
+      this.ownOffers = Math.max(0, this.ownOffers - 1); // replaced or disconnected meanwhile: not sent
+      this.micPending = false;
+      return;
+    }
+    this.micOfferMuted = !this.isMicOn;
+    // The mute state goes first. The offer names only the microphone's m=audio.
+    sendRequest(this.socket, 'mute', { muted: this.micOfferMuted });
+    sendRequest(this.socket, 'offer', { sdp: offer.sdp, tracks: [{ trackName: MICROPHONE_TRACK, mid: offer.mid }] });
+  }
+
+  private send(kind: 'tracks' | 'data' | 'microphones', action: 'subscribe' | 'unsubscribe', message: DeepPartial<Subscribe> | DeepPartial<Unsubscribe>) {
+    this.busy = true;
+    this.pending = kind;
+    sendRequest(this.socket, action, message);
+  }
+
+  private setSubscriptions(list: Subscription[]) {
+    this.subscriptions.clear();
+    for (const sub of list) {
+      this.subscriptions.set(sub.mid, sub);
+    }
+  }
+
+  /** Opens the channels the worker lists and closes the others. */
+  private setData(list: DataSubscription[]) {
+    const listed = new Set<string>();
+    for (const entry of list) {
+      listed.add(entry.deviceId);
+      const ids = entry.channels.map((channel) => `${channel.label}:${channel.id}`).join(',');
+      let current = this.dataSubs.get(entry.deviceId);
+      if (current && (current.ids !== ids || current.generation !== entry.generation)) {
+        this.closeChannels(entry.deviceId);
+        current = undefined;
+      }
+      if (!current) {
+        if (!this.peer) {
+          continue;
+        }
+        current = { generation: entry.generation, ids, canReply: false, channels: new Map(), receivers: [] };
+        for (const spec of entry.channels) {
+          current.channels.set(spec.label, this.openChannel(entry.deviceId, spec.label, spec.id, current));
+        }
+        this.dataSubs.set(entry.deviceId, current);
+      }
+      const granted = entry.canReply && !current.canReply;
+      current.canReply = entry.canReply;
+      if (granted) {
+        void this.confirmControl(entry.deviceId, current);
+      }
+    }
+    for (const deviceId of [...this.dataSubs.keys()]) {
+      if (!listed.has(deviceId)) {
+        this.closeChannels(deviceId);
+      }
+    }
+    this.changed();
+  }
+
+  /** A device's channel, negotiated on the id the worker gave. */
+  private openChannel(deviceId: string, label: string, id: number, owner: DataChannels): RTCDataChannel {
+    const channel = this.peer!.openChannel(label, id, CHANNEL_INIT[label]);
+    const receiver = new IpcReceiver((body) => this.onMessage?.(body, deviceId));
+    owner.receivers.push(receiver);
+    channel.addEventListener('message', (event) => {
+      try {
+        receiver.receive(Packet.decode(new Uint8Array(event.data as ArrayBuffer)));
+      } catch (err) {
+        console.warn(`CloudflareRoom: an unreadable message from ${deviceId} =>`, err);
+      }
+    });
+    channel.addEventListener('open', () => {
+      if (label === '_reliable' && this.dataSubs.get(deviceId) === owner && this.pendingTakes.delete(deviceId)) {
+        sendRequest(this.socket, 'takeControl', { deviceId });
+      }
+      this.changed();
+    });
+    channel.addEventListener('close', () => this.changed());
+    return channel;
+  }
+
+  private closeChannels(deviceId: string) {
+    const current = this.dataSubs.get(deviceId);
+    this.dataSubs.delete(deviceId);
+    for (const channel of current?.channels.values() ?? []) {
+      channel.close();
+    }
+    for (const receiver of current?.receivers ?? []) {
+      receiver.reset();
+    }
+    if (current) {
+      this.changed();
+    }
+  }
+
+  /** Tells the worker the takeover is done once the channels can carry our messages. */
+  private async confirmControl(deviceId: string, current: DataChannels) {
+    const reliable = current.channels.get('_reliable');
+    if (reliable && reliable.readyState !== 'open') {
+      await new Promise<void>((resolve) => {
+        const done = () => {
+          reliable.removeEventListener('open', done);
+          reliable.removeEventListener('close', done);
+          resolve();
+        };
+        reliable.addEventListener('open', done);
+        reliable.addEventListener('close', done);
+      });
+    }
+    if (this.dataSubs.get(deviceId) === current && current.canReply && reliable?.readyState === 'open') {
+      sendRequest(this.socket, 'controlReady', { deviceId });
+    }
+  }
+
+  private resetPeer(create: boolean) {
+    for (const deviceId of [...this.dataSubs.keys()]) {
+      this.closeChannels(deviceId);
+    }
+    this.peer?.close();
+    this.peer = null;
+    this.subscriptions.clear();
+    this.micPending = false;
+    this.micPublished = false;
+    if (this.streams.size > 0) {
+      this.streams.clear();
+      this.changed();
+    }
+    if (this.viewerStreams.size > 0) {
+      this.viewerStreams.clear();
+      this.onViewers?.(this.viewers);
+    }
+    if (!create) {
+      return;
+    }
+    const peer = new CloudflarePeer({
+      iceServers: this.iceServers,
+      bundlePolicy: 'max-bundle',
+      options: this.peerOptions(),
+    });
+    this.peer = peer;
+    peer.onTrack = () => {
+      if (peer === this.peer) {
+        this.attachTracks();
+      }
+    };
+    peer.onConnectionStateChange = (state) => {
+      if (peer !== this.peer) {
+        return;
+      }
+      console.debug(`CloudflareRoom: peer ${state}`);
+      if (state === 'connected') {
+        this.sync();
+      }
+      // "disconnected" may recover on its own; "failed" does not.
+      if (state === 'failed') {
+        this.rebuildPeer();
+      }
+    };
+  }
+
+  /** Groups the received tracks by the device or viewer they came from, matched by mid. */
+  private attachTracks() {
+    const byDevice = new Map<string, MediaStreamTrack[]>();
+    const byViewer = new Map<string, MediaStreamTrack[]>();
+    for (const transceiver of this.peer?.transceivers() ?? []) {
+      const sub = transceiver.mid ? this.subscriptions.get(transceiver.mid) : undefined;
+      const track = transceiver.receiver.track;
+      if (!sub || !track) {
+        continue;
+      }
+      const [map, key] = sub.viewerId ? [byViewer, sub.viewerId] : [byDevice, sub.deviceId];
+      const tracks = map.get(key) ?? [];
+      tracks.push(track);
+      map.set(key, tracks);
+    }
+    let voices = false;
+    for (const viewerId of new Set([...this.viewerStreams.keys(), ...byViewer.keys()])) {
+      const tracks = byViewer.get(viewerId) ?? [];
+      const current = this.viewerStreams.get(viewerId)?.getTracks() ?? [];
+      if (current.length === tracks.length && tracks.every((track) => current.includes(track))) {
+        continue;
+      }
+      voices = true;
+      if (tracks.length > 0) {
+        this.viewerStreams.set(viewerId, new MediaStream(tracks));
+      } else {
+        this.viewerStreams.delete(viewerId);
+      }
+    }
+    if (voices) {
+      this.onViewers?.(this.viewers);
+    }
+    let changed = false;
+    for (const deviceId of new Set([...this.streams.keys(), ...byDevice.keys()])) {
+      const tracks = byDevice.get(deviceId) ?? [];
+      const current = this.streams.get(deviceId)?.getTracks() ?? [];
+      const same = current.length === tracks.length && tracks.every((track) => current.includes(track));
+      if (same) {
+        continue;
+      }
+      changed = true;
+      if (tracks.length > 0) {
+        const stream = new MediaStream(tracks);
+        this.streams.set(deviceId, stream);
+        this.onStream?.(stream, deviceId);
+      } else {
+        this.streams.delete(deviceId);
+      }
+    }
+    if (changed) {
+      this.changed();
+    }
+  }
+
+  private snapshot(info: DeviceInfo): RoomDevice {
+    const control: RoomControl = {
+      controller: viewer(info.controller),
+      handover: viewer(info.handover),
+      waiting: info.waiting.map((ref) => viewer(ref)!),
+      mine: sameViewer(info.controller, this.me),
+      takingOver: sameViewer(info.handover, this.me),
+      inLine: info.waiting.some((ref) => sameViewer(ref, this.me)),
+    };
+    const refused = this.refused.get(info.deviceId);
+    const error = refused && refused.generation === info.generation && info.state === LIVE
+      ? errorName(refused.code)
+      : info.lastError
+        ? errorName(info.lastError)
+        : undefined;
+    return {
+      deviceId: info.deviceId,
+      state: stateName(info.state),
+      generation: info.generation,
+      tracks: [...info.tracks],
+      stream: this.streams.get(info.deviceId),
+      ...(error ? { error } : {}),
+      ipc: info.dataChannels,
+      control,
+      canSend: this.controls(info.deviceId, 'reliable'),
+    };
+  }
+}

@@ -26,16 +26,15 @@ npm install @mazupo/client
 ```html
 <video id="videoElement" autoplay playsinline controls></video>
 <script type="module">
-  import { PiCamera } from '@mazupo/client';
+  import { MqttCamera } from '@mazupo/client';
 
   const videoRef = document.getElementById('videoElement');
-  const camera = new PiCamera({
-    uid: 'your-custom-uid',
-    mqttHost: 'your.mqtt.cloud',
-    mqttPath: '/mqtt',
-    mqttPort: 8084,
-    mqttUsername: 'hakunamatata',
-    mqttPassword: 'Wonderful',
+  const camera = new MqttCamera({
+    deviceId: 'your-device-id',
+    host: 'your.mqtt.cloud',
+    port: 8084,
+    username: 'hakunamatata',
+    password: 'Wonderful',
     stunUrls: ['stun:stun1.l.google.com:19302'],
   });
 
@@ -47,8 +46,9 @@ npm install @mazupo/client
 </script>
 ```
 
-`uid` has to match the `--uid` the device was started with, and the MQTT settings are the broker
-both sides talk to.
+`deviceId` has to match the `--uid` the device was started with, and the MQTT settings are the
+broker both sides talk to. To watch a room of devices instead, use `LiveKitRoom` or
+`CloudflareRoom`: see [the API reference](docs/reference/README.md).
 
 ### For React Native
 
@@ -58,12 +58,12 @@ Install and configure [react-native-webrtc](https://github.com/react-native-webr
 npm install react-native-webrtc @mazupo/client
 ```
 
-`registerGlobals()` has to run once at app startup, before any `PiCamera` is created:
+`registerGlobals()` has to run once at app startup, before any `MqttCamera` is created:
 
 ```tsx
 import React, { useEffect, useState } from 'react';
 import { RTCView, registerGlobals } from 'react-native-webrtc';
-import { PiCamera, RNMediaStream } from '@mazupo/client';
+import { MqttCamera, RNMediaStream } from '@mazupo/client';
 
 registerGlobals();
 
@@ -71,13 +71,12 @@ export default function App() {
   const [streamUrl, setStreamUrl] = useState<string | null>(null);
 
   useEffect(() => {
-    const camera = new PiCamera({
-      uid: 'your-custom-uid',
-      mqttHost: 'your.mqtt.cloud',
-      mqttPath: '/mqtt',
-      mqttPort: 8084,
-      mqttUsername: 'hakunamatata',
-      mqttPassword: 'Wonderful',
+    const camera = new MqttCamera({
+      deviceId: 'your-device-id',
+      host: 'your.mqtt.cloud',
+      port: 8084,
+      username: 'hakunamatata',
+      password: 'Wonderful',
       stunUrls: ['stun:stun1.l.google.com:19302'],
     });
 
@@ -88,7 +87,7 @@ export default function App() {
     camera.connect();
 
     return () => {
-      camera.terminate();
+      camera.disconnect();
     };
   }, []);
 
@@ -106,7 +105,8 @@ export default function App() {
 
 - [Getting Started](docs/getting-started/README.md): the first video, on the web or in React Native.
 - [Guides](docs/guides/README.md): one complete example for each task.
-- [API Reference](docs/reference/README.md): options, events, methods, DataChannels and the gamepad.
+- [API Reference](docs/reference/README.md): `MqttCamera`, `LiveKitRoom`, `CloudflareRoom`, DataChannels and the gamepad.
+- [Migrating from 3.x](docs/migrating-from-3x.md): `PiCamera` became `MqttCamera` and `LiveKitRoom`, and Cloudflare Realtime moved to `CloudflareRoom`.
 - [Migrating from 2.x](docs/migrating-from-2x.md): renamed exports, the new wire protocol, and what it means for your device.
 
 ## Examples
@@ -120,8 +120,8 @@ export default function App() {
 - [Drive a device with a gamepad](docs/guides/gamepad.md): read a controller and send each reading to the device, in JavaScript or React.
 - [Start and stop recording, and download a file](docs/guides/recording.md): drive the device's on-demand recorder.
 - [Adjust camera controls](docs/guides/camera-controls.md): brightness, contrast, and the rest of `CameraControlId`.
-- [Play through the LiveKit SFU](docs/guides/livekit.md): many viewers, one uplink.
-- [Pull from the Cloudflare Realtime SFU](docs/guides/cloudflare.md): the same, with nothing to host.
+- [Watch a LiveKit room](docs/guides/livekit.md): many viewers, one uplink.
+- [Watch a room through Cloudflare Realtime](docs/guides/cloudflare.md): every device in a room, with nothing to host, and control one of them.
 
 # License
 

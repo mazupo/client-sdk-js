@@ -1,8 +1,6 @@
-import { ActionType } from '../pi-camera.types';
-
 export interface SignalingClient<
   TClient,
-  TAction = ActionType
+  TAction = string
 > {
   onConnect?: (conn: TClient) => void;
   connect: () => void;

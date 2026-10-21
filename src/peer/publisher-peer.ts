@@ -38,17 +38,22 @@ export class PublisherPeer extends RtcPeer {
     this.sendToEndpoint(binary, mode);
   }
 
-  /** @internal Addressed send, for whatever encodes for a named endpoint. */
-  sendToEndpoint = (binary: Uint8Array, mode: IpcMode = 'reliable', options?: IpcOptions) => {
+  /**
+   * @internal Addressed send, for whatever encodes for a named endpoint. `to` names the
+   * participants that get it; everyone in the room does without it.
+   */
+  sendToEndpoint = (binary: Uint8Array, mode: IpcMode = 'reliable', options?: IpcOptions, to?: string[]) => {
     const data = Packet.encode(Packet.create(ipcBody(binary, options))).finish();
 
     const packet = new DataPacket({
       kind: mode === 'lossy' ? DataPacket_Kind.LOSSY : DataPacket_Kind.RELIABLE,
+      destinationIdentities: to ?? [],
       value: {
         case: 'user',
         value: new UserPacket({
           payload: data,
           topic: 'ipc_topic',
+          destinationIdentities: to ?? [],
         })
       }
     });

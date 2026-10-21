@@ -1,13 +1,13 @@
 # Gamepad
 
-Reads a controller, encodes each reading, and sends it to the device's `gamepad` endpoint.
+Sends a controller to the device's `gamepad` endpoint. Every [connection](connection.md#gamepad) has `gamepad()`. The entry points below add button names, a React hook and a view.
 
 ```ts
-import { attachGamepad, Button, isPressed } from '@mazupo/client/gamepad';
+import { Button, isPressed } from '@mazupo/client/gamepad';
 import { useGamepad, GamepadView } from '@mazupo/client/gamepad/react';
 ```
 
-`react` is an optional peer dependency, needed only for the second entry point. `GamepadView` draws with SVG and works on the web only. The first entry point also works in React Native.
+`react` is an optional peer dependency, needed only for the second entry point. `GamepadView` draws with SVG and works on the web only. The rest also works in React Native.
 
 See the [Gamepad guide](../guides/gamepad.md) for examples.
 
@@ -21,37 +21,57 @@ pi-webrtc --enable-gamepad ...
 
 pi-webrtc writes the latest state of every gamepad to a Unix socket, as one JSON line per update. See [Gamepad in the pi-webrtc docs](https://mazupo.com/docs/pi-webrtc/integrations/gamepad) for the format.
 
+## connection.gamepad
+
+`connection.gamepad(options?)` returns a running `GamepadSampler`. Call it before or after `connect()`.
+
+A connection has one gamepad. Calling `gamepad()` again returns the same sampler.
+
+`disconnect()` stops it. `stop()` stops it too, and keeps the connection.
+
+In a room, the readings go where `sendText()` goes. Pass `deviceIds` to send only to those devices:
+
+```javascript
+room.gamepad({ deviceIds: ['rudder'] });
+```
+
 ## Exports
 
 | Export | Description |
 | --- | --- |
-| `attachGamepad(camera, options?)` | Reads a controller into a `PiCamera`. Returns the sampler, already running. |
-| `GamepadSampler` | The reading loop: `start()`, `stop()`, `onSnapshot()`, `onButton()`, `onButtonChange()`, `onSuspend()`, `setSink()`, `.snapshot`, `.sampling` |
+| `GamepadSampler` | The reading loop: `start()`, `stop()`, `onSnapshot()`, `onButton()`, `onButtonChange()`, `onSuspend()`, `.snapshot`, `.sampling`. `connection.gamepad()` returns one. `new GamepadSampler()` reads a pad without sending anything. |
 | `toSnapshot(gamepad)` | Turns a browser `Gamepad` into a plain snapshot. |
 | `isPressed(snapshot, index)` / `Button` | Read the button bits. |
 | `sameSnapshot(a, b)` | Whether two readings would drive the device the same way. |
 | `InputReport`, `GamepadInput` | The generated protobuf types. |
-| `useGamepad(options)` <sup>react</sup> | Runs a sampler while a component is mounted. |
+| `useGamepad(connection, options?)` <sup>react</sup> | Sends a gamepad to a connection while a component is mounted. |
 | `GamepadView` <sup>react</sup> | The SVG view. |
 
-`attachGamepad(camera, options?)` is the whole setup. You can call it before or after `connect()`: a reading taken before the connection is up is dropped, and sending starts when the channel opens. It uses [canSend](methods.md#cansend) to decide. `GamepadSampler` is the same loop without the camera, for driving it by hand or sending somewhere else. Its `setSink()` changes the destination. It does not follow a connection.
+`buttons` is a bit field in the standard mapping. Read it with `isPressed(snapshot, Button.Start)`.
 
-`buttons` is a bit field: bit *n* is `buttons[n].pressed` in the standard mapping. Read it with `isPressed(snapshot, Button.Start)`. An axis or a button that the controller does not report reads as centered or released, and does not throw.
+`onButton` and `onButtonChange` fire on press and on release. Both return a function that removes the listener.
 
-`onButton` and `onButtonChange` fire once on press and once on release, never while a button is held. They run whether or not a sink is set. Both return a function that removes the listener. If a controller is unplugged while a button is held, it reports the button as released, so a toggle cannot stay on.
+## useGamepad
+
+`useGamepad(connection: Connection | null, options?)` returns `{ connected, suspended, sampler }`.
+
+- Pass `null` before there is a connection. The pad is still read, so `<GamepadView>` can show it.
+- When you pass a connection, the hook uses that connection's gamepad.
+- `connected` is whether a pad is reporting. `suspended` is why reading stopped, or `null`.
+- Only `connected` and `suspended` go into React state. The readings arrive 60 times a second and go straight to the view.
 
 ## Options
 
-Taken by `attachGamepad`, `useGamepad` and the `GamepadSampler` constructor.
+Taken by `connection.gamepad()`, `useGamepad` and the `GamepadSampler` constructor.
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | hz | `number` | `60` | Readings per second. |
 | endpoint | `string` | `gamepad` | The device IPC endpoint that each reading goes to. |
 | sampleWhileHidden | `boolean` | `false` | Keep reading while the page is hidden. |
-| sink | `IpcSink \| null` | | The destination, for `GamepadSampler` only. `attachGamepad` and `useGamepad` take the camera instead. |
+| deviceIds | `string[]` | | In a room: only these devices. Not for `GamepadSampler`. |
 
-Anything with `sendToEndpoint` is an `IpcSink`, exported from the main entry point. `PiCamera` is one.
+`hz`, `endpoint` and `sampleWhileHidden` apply when the connection's gamepad is made, at the first `gamepad()` call.
 
 ## Behavior
 

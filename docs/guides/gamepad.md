@@ -1,28 +1,29 @@
 # Gamepad
 
-Read a gamepad in the browser, and send each reading to the device. On the device, pi-webrtc writes the gamepad state to a Unix socket as JSON lines. See [Gamepad in the pi-webrtc docs](https://mazupo.com/docs/pi-webrtc/integrations/gamepad).
+Send a gamepad from the browser to the device. pi-webrtc writes it to a Unix socket as JSON lines. See [Gamepad in the pi-webrtc docs](https://mazupo.com/docs/pi-webrtc/integrations/gamepad).
 
 The device must run pi-webrtc with `--enable-gamepad`. Without it, the readings are sent but dropped.
 
+Every connection has `gamepad()`: `MqttCamera`, `LiveKitRoom` and `CloudflareRoom`.
+
 ## Plain JavaScript
 
-`attachGamepad()` reads a controller and sends each reading on the lossy channel. You can call it before or after `connect()`. It sends nothing until the channel is open, and it stops sending when the connection ends. The reading loop keeps running, and `onSnapshot` and `onButton` keep working.
+`gamepad()` sends each reading on the lossy channel. Call it before or after `connect()`. It stops on `disconnect()`.
 
 ```javascript
-import { PiCamera } from '@mazupo/client';
-import { attachGamepad, Button } from '@mazupo/client/gamepad';
+import { MqttCamera } from '@mazupo/client';
+import { Button } from '@mazupo/client/gamepad';
 
-const camera = new PiCamera({
-  uid: 'your-custom-uid',
-  mqttHost: 'your.mqtt.cloud',
-  mqttPath: '/mqtt',
-  mqttPort: 8084,
-  mqttUsername: 'hakunamatata',
-  mqttPassword: 'Wonderful',
+const camera = new MqttCamera({
+  deviceId: 'your-device-id',
+  host: 'your.mqtt.cloud',
+  port: 8084,
+  username: 'hakunamatata',
+  password: 'Wonderful',
   stunUrls: ['stun:stun1.l.google.com:19302'],
 });
 
-const pad = attachGamepad(camera, { hz: 60 });
+const pad = camera.gamepad({ hz: 60 });
 
 // snapshot is null when no controller is reporting.
 pad.onSnapshot((snapshot) => {
@@ -37,17 +38,42 @@ pad.onButton(Button.A, (pressed) => {
 camera.connect();
 ```
 
+## In a room
+
+In a room, the gamepad goes where `sendText()` goes. In a `CloudflareRoom`, that is every device that you control. Take control first. To drive only some of them, pass `deviceIds`:
+
+```javascript
+import { CloudflareRoom } from '@mazupo/client';
+
+const room = new CloudflareRoom({
+  apiUrl: 'https://api.mazupo.com/sfu',
+  apiKey: '-706d13ForZLHmv6FwARf9ZgEEfO78AattyxWhNoHFo',
+  roomId: 'your-room',
+  ipc: true,
+});
+room.connect();
+
+room.takeControl('rudder');
+room.gamepad({ deviceIds: ['rudder'] });
+
+// Later, drive another device as well.
+room.takeControl('crane');
+room.gamepad({ deviceIds: ['rudder', 'crane'] });
+```
+
+A connection has one gamepad, so each call returns the same one.
+
 ## React
 
-`useGamepad` runs the reading loop while the component is mounted, and `<GamepadView>` draws the gamepad. Only `connected` and `suspended` go into React state. The readings arrive 60 times a second and go straight to the view, so a moving stick re-renders only that view.
+`useGamepad` sends a gamepad while the component is mounted. `<GamepadView>` draws it.
 
 ```tsx
-import { PiCamera } from '@mazupo/client';
+import type { Connection } from '@mazupo/client';
 import { GamepadView, useGamepad } from '@mazupo/client/gamepad/react';
 
-// Pass the camera as soon as it exists, and null before that.
-function Controller({ camera }: { camera: PiCamera | null }) {
-  const { connected, suspended, sampler } = useGamepad({ camera, hz: 60 });
+// Pass the connection as soon as it exists, and null before that.
+function Controller({ connection }: { connection: Connection | null }) {
+  const { connected, suspended, sampler } = useGamepad(connection, { hz: 60 });
 
   if (!connected) {
     return <p>Press any button on your gamepad</p>;
@@ -61,6 +87,8 @@ function Controller({ camera }: { camera: PiCamera | null }) {
   );
 }
 ```
+
+In a room, `useGamepad(room, { deviceIds })` sends only to those devices.
 
 `react` is an optional peer dependency. You only need it for this entry point.
 

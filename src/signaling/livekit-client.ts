@@ -1,24 +1,11 @@
-import { SignalingClient, generateUUID } from './signaling-client';
+import { SignalingClient } from './signaling-client';
 
-export interface LiveKitConnectionOptions {
-  /**
-   * The LiveKit relay to dial, e.g. wss://picamera-hono.<account>.workers.dev.
-   * Matches pi-webrtc's `--livekit-url`.
-   */
-  livekitUrl?: string;
-
-  /**
-   * Matches pi-webrtc's `--livekit-key`. Issued by LiveKit, and not the same thing as the
-   * `apiKey` of the picamera device API — the relay compares this one against its own
-   * LIVEKIT_API_KEY before it mints an access token.
-   */
-  livekitKey?: string;
-
-  /** The room to join. Matches pi-webrtc's `--livekit-room`. */
-  livekitRoom?: string;
-
-  /** Becomes the LiveKit participant identity. A random uuid when omitted. */
-  userId?: string;
+export interface LiveKitClientOptions {
+  url: string;
+  apiKey: string;
+  roomId: string;
+  /** The participant identity. */
+  viewerId: string;
 }
 
 export type LiveKitActionType = 'join' | 'offer' | 'answer' |
@@ -95,11 +82,11 @@ export class LiveKitClient implements SignalingClient<LiveKitClient, LiveKitActi
   onTrackPublished?: () => void;
   onLeave?: () => void;
 
-  constructor(options: LiveKitConnectionOptions) {
-    this.url = options.livekitUrl;
-    this.livekitKey = options.livekitKey ?? '';
-    this.userId = options.userId ?? generateUUID();
-    this.roomId = options.livekitRoom ?? '';
+  constructor(options: LiveKitClientOptions) {
+    this.url = options.url;
+    this.livekitKey = options.apiKey;
+    this.userId = options.viewerId;
+    this.roomId = options.roomId;
   }
 
   connect = () => {
