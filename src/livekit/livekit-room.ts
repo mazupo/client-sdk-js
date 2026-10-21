@@ -6,12 +6,7 @@ import { SubscriberPeer } from '../peer/subscriber-peer';
 import { LiveKitClient, Participant, Quality, RoomInfo, Speaking } from '../signaling/livekit-client';
 import { LiveKitDevice, LiveKitRoomOptions, LiveKitViewer } from './types';
 
-/**
- * A LiveKit room, through a relay. Devices publish into it; this viewer
- * subscribes to them and sends IPC over LiveKit's data channels. With `microphone` (the
- * default), viewers talk to each other: this viewer publishes its microphone, muted until
- * `toggleMic()`, and LiveKit sends everyone else's.
- */
+/** A LiveKit room through a relay: devices publish, this viewer subscribes and sends IPC. With `microphone`, viewers talk. */
 export class LiveKitRoom extends SfuRoom<LiveKitDevice, LiveKitViewer> {
   /** The room's LiveKit sid and name. */
   onRoomInfo?: (room: RoomInfo) => void;

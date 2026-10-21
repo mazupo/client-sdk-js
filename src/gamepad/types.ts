@@ -46,10 +46,7 @@ export type SuspendReason =
   | 'disconnected';
 
 export interface GamepadSamplerOptions {
-  /**
-   * @internal The connection that sends the readings. Its `gamepad()` sets it; a sampler made
-   * without one reads the pad without sending.
-   */
+  /** @internal The connection that sends the readings. Without one, the pad is read but not sent. */
   connection?: Connection | null;
 
   /** Samples per second. Defaults to 60. */

@@ -4,16 +4,10 @@ import type { Participant } from '../signaling/livekit-client';
 export type { Participant, Quality, RoomInfo, Speaking } from '../signaling/livekit-client';
 
 export interface LiveKitRoomOptions extends SfuRoomOptions {
-  /**
-   * The LiveKit relay to dial, e.g. `wss://api.mazupo.com`. Matches
-   * pi-webrtc's `--livekit-url`.
-   */
+  /** The LiveKit relay, e.g. `wss://api.mazupo.com`. Matches pi-webrtc's `--livekit-url`. */
   url: string;
 
-  /**
-   * Matches pi-webrtc's `--livekit-key`. Issued by LiveKit; the relay compares it against its
-   * own LIVEKIT_API_KEY before it mints an access token.
-   */
+  /** Matches pi-webrtc's `--livekit-key`. The relay checks it before it mints an access token. */
   apiKey: string;
 }
 

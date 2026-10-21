@@ -3,21 +3,14 @@ import { IpcMode, IpcOptions, PeerOptions, RtcPeer } from '../peer/rtc-peer';
 import { clampJitterBufferTarget } from '../utils/rtc-tools';
 import { ConnectionError, ConnectionOptions, ConnectionStatus, GamepadOptions } from './types';
 
-/**
- * What every connection has, whatever carries it: `MqttCamera`, `LiveKitRoom` and
- * `CloudflareRoom`. The status, errors, IPC, gamepad, microphone, speaker and jitter buffer work
- * the same way on all three.
- */
+/** What every connection shares: status, errors, IPC, gamepad, audio and the jitter buffer. */
 export abstract class Connection {
   onStatus?: (status: ConnectionStatus) => void;
-  /** Something went wrong. When it is why the connection gave up, `onStatus('closed')` follows. */
+  /** Something went wrong. If the connection gave up, `onStatus('closed')` follows. */
   onError?: (error: ConnectionError) => void;
   /** An IPC message from a device. */
   onMessage?: (data: Uint8Array, deviceId: string) => void;
-  /**
-   * A device's media arrived or changed. In a room `id` is the device; over MQTT it is the
-   * stream's id, as one device can send more than one camera.
-   */
+  /** A device's media arrived or changed. `id` is the device in a room, or the stream's id over MQTT. */
   onStream?: (stream: MediaStream, id: string) => void;
 
   private currentStatus: ConnectionStatus = 'closed';
@@ -76,12 +69,12 @@ export abstract class Connection {
     this.closed();
   }
 
-  /** Sends text to the device's IPC socket. In a room, to every device `canSend()` counts. False if it went nowhere. */
+  /** Sends text to the device, or in a room to the devices you control. False if it went nowhere. */
   sendText(text: string, mode: IpcMode = 'reliable'): boolean {
     return this.sendData(new TextEncoder().encode(text), mode);
   }
 
-  /** Sends bytes to the device's IPC socket. In a room, to every device `canSend()` counts. False if it went nowhere. */
+  /** Sends bytes to the device, or in a room to the devices you control. False if it went nowhere. */
   sendData(data: Uint8Array, mode: IpcMode = 'reliable'): boolean {
     return this.deliver(data, mode);
   }
@@ -91,16 +84,12 @@ export abstract class Connection {
     return this.deliverable(mode);
   }
 
-  /** @internal Addressed send, for whatever encodes for a named endpoint. */
+  /** @internal Addressed send, for a named endpoint. */
   sendToEndpoint(data: Uint8Array, mode: IpcMode = 'reliable', options?: IpcOptions): boolean {
     return this.deliver(data, mode, options);
   }
 
-  /**
-   * Reads a gamepad and sends it to the device, 60 times a second by default. Readings taken
-   * while nothing can be sent are dropped, so it can start before `connect()`. A connection has
-   * one gamepad: calling this again returns the same sampler, started.
-   */
+  /** Sends a gamepad to the device, 60 times a second by default. One per connection: calling again returns it, started. */
   gamepad(options: GamepadOptions = {}): GamepadSampler {
     this.sampler ??= new GamepadSampler({ ...options, connection: this });
     this.sampler.start();
@@ -119,10 +108,7 @@ export abstract class Connection {
     this.peers().forEach((peer) => peer.toggleSpeaker(enabled));
   }
 
-  /**
-   * The browser's `RTCStatsReport` for the receiving PeerConnection, where `inbound-rtp` reports
-   * the jitter buffer, freezes and packet loss. `undefined` before there is one.
-   */
+  /** The receiving PeerConnection's `RTCStatsReport`, or `undefined` before there is one. */
   getStats(selector?: MediaStreamTrack | null): Promise<RTCStatsReport> | undefined {
     return this.receivingPeer()?.getStats(selector);
   }
@@ -133,7 +119,7 @@ export abstract class Connection {
     this.peers().forEach((peer) => peer.setJitterBufferTarget(target));
   }
 
-  /** The target last asked for, not the one the browser settled on. `undefined`: none asked for. */
+  /** The target last asked for, not the one the browser settled on. `undefined`: none. */
   getJitterBufferTarget(): number | null | undefined {
     return this.jitterBufferTarget;
   }
@@ -147,7 +133,7 @@ export abstract class Connection {
   /** The PeerConnections in use, for the microphone, speaker and jitter buffer. */
   protected abstract peers(): RtcPeer[];
 
-  /** Sends to the devices `deviceIds` names, or by default to every device `canSend()` counts. */
+  /** Sends to `deviceIds`, or by default to every device `canSend()` counts. */
   protected abstract deliver(data: Uint8Array, mode: IpcMode, options?: IpcOptions, deviceIds?: string[]): boolean;
 
   protected abstract deliverable(mode: IpcMode, deviceIds?: string[]): boolean;

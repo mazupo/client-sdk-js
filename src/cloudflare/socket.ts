@@ -7,14 +7,14 @@ import {
 } from '../proto/cloudflare';
 import { DeviceStateName } from './types';
 
-/** The worker answers "ping" with "pong" without waking its Durable Object. */
+/** The worker answers "ping" without waking its Durable Object. */
 export const PING_INTERVAL_MS = 15_000;
 
 export interface TokenBody {
   viewer_id: string;
   room_id: string;
   can_subscribe: true;
-  /** Only a connection with the same secret can resume or replace this viewer. */
+  /** Only the same secret can resume or replace this viewer. */
   secret: string;
   data_channels?: true;
 }
@@ -73,11 +73,7 @@ export async function requestToken(apiUrl: string, apiKey: string, body: TokenBo
   return { token: json.token, url: json.url };
 }
 
-/**
- * Calls onTick every intervalMs. In a browser the timer runs in a dedicated worker: a hidden tab
- * runs its own timers only once a minute after a while, which is longer than the worker's 45 s
- * presence window. Elsewhere (React Native, Node) a plain interval.
- */
+/** Calls onTick every intervalMs, from a dedicated worker in a browser: hidden tabs run their own timers once a minute. */
 function startTicker(intervalMs: number, onTick: () => void): () => void {
   if (typeof Worker !== 'undefined' && typeof Blob !== 'undefined' && typeof URL?.createObjectURL === 'function') {
     try {
@@ -110,7 +106,7 @@ export function openSocket(url: string, token: string): WebSocket {
 
 type RequestAction = keyof ViewerRequest;
 
-/** Sends ViewerRequest { [action]: message } if the socket is open. Unset fields take defaults. */
+/** Sends ViewerRequest { [action]: message } if the socket is open. */
 export function sendRequest<A extends RequestAction>(
   ws: WebSocket | null,
   action: A,

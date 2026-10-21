@@ -9,10 +9,7 @@ import type { GamepadSamplerOptions } from '../gamepad/types';
 export type ConnectionStatus = 'connecting' | 'connected' | 'reconnecting' | 'closed';
 
 export interface ConnectionError {
-  /**
-   * What went wrong, in lower case: `timeout`, `reconnect_failed`, `signaling`, `left`, or for
-   * Cloudflare `token`, `replaced` and the worker's own codes such as `not_controller`.
-   */
+  /** What went wrong, e.g. `timeout`, `reconnect_failed`, `token` or a worker code such as `not_controller`. */
   code: string;
   message: string;
   /** The device the error is about, if any. */
@@ -21,9 +18,9 @@ export interface ConnectionError {
 
 /** What every connection takes. */
 export interface ConnectionOptions {
-  /** How long `connect()` waits to be `connected` before giving up with `timeout`, in ms. `0` waits forever. */
+  /** How long `connect()` waits for `connected` before giving up with `timeout`, in ms. `0` waits forever. */
   timeout?: number;
-  /** Whether the microphone starts unmuted, where the connection sends one. */
+  /** Whether the microphone starts unmuted. */
   isMicOn?: boolean;
   /** Whether received audio plays. `true` by default. */
   isSpeakerOn?: boolean;
@@ -40,21 +37,15 @@ export interface SfuRoomOptions extends ConnectionOptions {
   roomId: string;
   /** Who this viewer is in the room. A random UUID when omitted. */
   viewerId?: string;
-  /**
-   * Talk with the other viewers: publish this viewer's microphone, muted until `toggleMic()`.
-   * `true` by default; the browser asks for the microphone on `connect()`. `false` only listens.
-   */
+  /** Talk with the other viewers: publish the microphone, muted until `toggleMic()`. `true` by default; `false` only listens. */
   microphone?: boolean;
 }
 
-/** Everything a gamepad sampler takes except where it sends, which is the connection. */
+/** What a gamepad sampler takes, except the connection. */
 export type GamepadOptions = Omit<GamepadSamplerOptions, 'connection'>;
 
 export interface RoomGamepadOptions extends GamepadOptions {
-  /**
-   * Only these devices. By default the gamepad goes where `sendText()` goes. Call `gamepad()`
-   * again with other ids to change them; leave the key out to keep them.
-   */
+  /** Only these devices; by default where `sendText()` goes. Call `gamepad()` again to change them. */
   deviceIds?: string[];
 }
 

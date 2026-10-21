@@ -1,10 +1,6 @@
 import { RtcPeer, RtcPeerConfig } from "./rtc-peer";
 
-/**
- * A cf-sfu-worker room's one PeerConnection to the SFU. The room decides when to offer, groups
- * tracks by the device their mid belongs to, and starts over with a new session when the
- * connection fails, so this peer neither offers nor restarts ICE on its own.
- */
+/** A cf-sfu-worker room's PeerConnection. The room decides when to offer, so this peer neither offers nor restarts ICE. */
 export class CloudflarePeer extends RtcPeer {
   /** A track arrived. The room maps it to a device by its mid. */
   onTrack?: (event: RTCTrackEvent) => void;

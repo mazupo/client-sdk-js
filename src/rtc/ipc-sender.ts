@@ -41,10 +41,7 @@ function sendOn(channel: RTCDataChannel | undefined, data: Uint8Array<ArrayBuffe
   return true;
 }
 
-/**
- * Sends an IPC payload the way the device's IpcChannel reads it: flat in `Packet.raw` (or
- * `Packet.ipc` with an endpoint) up to IPC_FLAT_LIMIT, as a Stream beyond that.
- */
+/** Sends an IPC payload the way the device reads it: flat up to IPC_FLAT_LIMIT, as a Stream beyond it. */
 export function sendIpc(
   channel: RTCDataChannel | undefined,
   binary: Uint8Array,

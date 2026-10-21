@@ -46,7 +46,7 @@ const SECRET_KEY = '@mazupo/client:cloudflare-secret:';
 
 const LIVE = DeviceState.DEVICE_STATE_LIVE;
 
-/** Refusals that will not change for the same publication. They are not asked for again. */
+/** Refusals that do not change for the same publication. Not asked for again. */
 const PERMANENT = new Set([
   ErrorCode.ERROR_CODE_VIEWER_LIMIT,
   ErrorCode.ERROR_CODE_NOT_MEMBER,
@@ -54,10 +54,10 @@ const PERMANENT = new Set([
   ErrorCode.ERROR_CODE_NO_DATA_CHANNELS,
 ]);
 
-/** Once a device is live the SFU is reachable, and the PeerConnection gets this long to connect. */
+/** Once a device is live the SFU is reachable; the PeerConnection gets this long to connect. */
 const CONNECT_GRACE_MS = 4_000;
 
-/** The delivery every end of a device's channels uses (see cloudflare.proto). */
+/** The delivery every end of a device's channels uses. */
 const CHANNEL_INIT: Record<string, RTCDataChannelInit> = {
   _lossy: roleInit(ChannelRole.Lossy),
   _reliable: roleInit(ChannelRole.Reliable),
@@ -94,10 +94,7 @@ function viewer(ref: ViewerRef | undefined): RoomViewer | undefined {
   return ref ? { room: ref.room, viewerId: ref.viewerId } : undefined;
 }
 
-/**
- * The secret this tab keeps for a viewer id the app chose. It stays in sessionStorage, so a reload
- * with the same id resumes. Without sessionStorage it lasts as long as the room: give `secret`.
- */
+/** The secret this tab keeps for an app-chosen viewer id, so a reload resumes. Without sessionStorage, give `secret`. */
 function viewerSecret(viewerId: string): string {
   const key = `${SECRET_KEY}${viewerId}`;
   try {
@@ -122,32 +119,21 @@ function rtcIceServer(server: IceServer): RTCIceServer {
 }
 
 /**
- * Watches one room of a cf-sfu-worker: every device in it, through one WebSocket and one
- * PeerConnection. Devices publish only while someone watches, so a device that sleeps wakes when
- * this viewer joins, and its tracks are pulled once it is live.
- *
- * With `ipc`, each live device's `_lossy` and `_reliable` channels open too: messages from the
- * device arrive on `onMessage`, and the viewer in control of a device can send to it. Only one
- * viewer controls a device at a time; others wait in line. `sendText()` goes to every device this
- * viewer controls, `sendTextTo()` to one.
- *
- * With `microphone` (the default), viewers talk to each other: this viewer publishes its
- * microphone, muted until `toggleMic()`, and hears everyone else's. The room's devices play the
- * voices too, unless they run with `--no-audio`.
- *
- * After a dropped connection it reconnects on its own until `disconnect()`.
+ * Watches every device in one room of a cf-sfu-worker, through one WebSocket and one PeerConnection.
+ * With `ipc`, each device's channels open and the viewer in control can send to it.
+ * With `microphone` (the default), viewers talk to each other. It reconnects until `disconnect()`.
  */
 export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
   private readonly apiUrl: string;
   private readonly apiKey: string;
   private readonly ipc: boolean;
   private readonly microphone: boolean;
-  /** Sent with each token request: only a connection with it can resume or replace this viewer. */
+  /** Sent with each token request: only it can resume or replace this viewer. */
   private readonly secret: string;
 
   /** The microphone, once the browser gave it. Kept across PeerConnections. */
   private micStream?: MediaStream;
-  /** Counts requests for the microphone; `disconnect()` voids the one the browser still asks about. */
+  /** Counts microphone requests; `disconnect()` voids the one still pending. */
   private micAsk = 0;
   /** The browser is asking for the microphone. */
   private micAsking = false;
@@ -155,14 +141,14 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
   private micBlocked = false;
   /** Our microphone offer waits for its answer. */
   private micPending = false;
-  /** Whether that offer said muted, to send a change made while it waited. */
+  /** Whether that offer said muted, to send a change made meanwhile. */
   private micOfferMuted = true;
   /** The current PeerConnection publishes our microphone. */
   private micPublished = false;
   private micFailures = 0;
   private micRetryAt = 0;
 
-  /** The one socket in use. Events from any older socket are ignored. */
+  /** The one socket in use. Events from older sockets are ignored. */
   private socket: WebSocket | null = null;
   private connectSeq = 0;
   private reconnectTimer?: Timer;
@@ -183,10 +169,7 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
   /** What the request in flight asks for, so per-device errors go to the right retry list. */
   private pending: 'tracks' | 'data' | 'microphones' = 'tracks';
   private busyFailures = 0;
-  /**
-   * Our own offers without an answer yet. Only the answer to the last one applies, and
-   * subscribing waits until then.
-   */
+  /** Our offers without an answer yet. Only the last one's answer applies, and subscribing waits for it. */
   private ownOffers = 0;
   /** Own offers in a row the worker could not take, for the backoff. */
   private offerFailures = 0;
@@ -218,7 +201,7 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
     this.apiKey = options.apiKey;
     this.ipc = options.ipc ?? false;
     this.microphone = options.microphone ?? true;
-    // A random id is not used again after a reload, so its secret is not kept either.
+    // A random id is not reused after a reload, so its secret is not kept.
     this.secret = options.secret ?? (options.viewerId?.trim() ? viewerSecret(this.viewerId) : generateRequestId());
     if (this.secret.length < 16) {
       throw new Error('CloudflareRoom needs a secret of at least 16 characters.');
@@ -269,10 +252,7 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
     this.shutDown(true);
   }
 
-  /**
-   * Controls the device if nobody does, or waits in line. Needs `ipc`. The worker takes it only
-   * once this viewer's channels to the device are open, so until then it waits here.
-   */
+  /** Controls the device if nobody does, or waits in line. Needs `ipc`. Waits here until our channels to it are open. */
   takeControl = (deviceId: string) => {
     if (!this.ipc) {
       console.warn('takeControl needs a CloudflareRoom with ipc: true.');
@@ -487,7 +467,7 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
         this.attempt = 0;
         this.iceServers = message.iceServers.map(rtcIceServer);
         this.me = { room: message.room, viewerId: message.viewerId };
-        // An answer to an offer sent on the old socket is lost. Without it, start over.
+        // An answer to an offer sent on the old socket is lost. Start over.
         if (!message.resumed || !this.peer || this.ownOffers > 0) {
           this.ownOffers = 0;
           this.resetPeer(true);
@@ -522,7 +502,7 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
         for (const [id, info] of next) {
           this.infos.set(id, info);
         }
-        // A device that left counts its generations from 1 again when it comes back.
+        // A device that left counts its generations from 1 again.
         for (const list of [this.refused, this.retries, this.dataRetries, this.pendingTakes]) {
           for (const id of [...list.keys()]) {
             if (!this.infos.has(id)) {
@@ -549,7 +529,7 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
         break;
       case 'answer': {
         this.ownOffers = Math.max(0, this.ownOffers - 1);
-        // The answer to an offer from a PeerConnection we have replaced since.
+        // The answer to an offer from a PeerConnection we replaced since.
         const peer = this.peer;
         if (this.ownOffers > 0 || !peer) {
           break;
@@ -642,7 +622,7 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
     }
 
     if (error.viewerId && error.request === 'subscribe') {
-      // Usually the viewer stopped publishing meanwhile. Ask again in a moment if it still does.
+      // Usually the viewer stopped publishing meanwhile. Ask again soon if it still does.
       const generation = this.viewerInfos.find((info) => info.viewerId === error.viewerId)?.microphoneGeneration ?? 0;
       const previous = this.micRetries.get(error.viewerId);
       const count = previous?.generation === generation ? previous.count + 1 : 0;
@@ -724,11 +704,7 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
     this.attachTracks();
   }
 
-  /**
-   * Connects the PeerConnection with our own offer: the `server-events` channel puts an
-   * m=application section in it. The SFU answers at once, so the PeerConnection connects while
-   * the devices wake, and tracks come later with the SFU's offers. Data channels need it too.
-   */
+  /** Connects with our own offer (m=application) while the devices wake. Tracks come with the SFU's offers. */
   private async connectEarly(): Promise<void> {
     const peer = this.peer;
     if (!peer) {
@@ -751,11 +727,7 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
     sendRequest(this.socket, 'offer', { sdp });
   }
 
-  /**
-   * A device went live, so the SFU is reachable. A PeerConnection made during an SFU outage may
-   * never connect, even while its ICE checks go on, and would only fail after about 15 s. Give
-   * it a few seconds, then start over.
-   */
+  /** A device is live, so the SFU is reachable. A PeerConnection made during an outage may never connect. */
   private checkConnects() {
     if (this.connectCheck || !this.peer || this.peer.connectionState === 'connected') {
       return;
@@ -769,11 +741,7 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
     }, CONNECT_GRACE_MS);
   }
 
-  /**
-   * Starts over with a new PeerConnection after the last one failed, e.g. the SFU was out of
-   * reach for a while. Our offer gets it a new SFU session; requests for the old one are void,
-   * and we subscribe again once it is answered. Control of devices stays with us.
-   */
+  /** A new PeerConnection after the last one failed: a new SFU session, then we subscribe again. Control stays. */
   private rebuildPeer() {
     clearTimeout(this.rebuildTimer);
     clearTimeout(this.connectCheck);
@@ -797,16 +765,14 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
     this.syncTimer = setTimeout(() => this.sync(), delay);
   }
 
-  /** Brings the subscriptions in line with the devices that are live. One request at a time. */
+  /** Brings the subscriptions in line with the live devices. One request at a time. */
   private sync() {
-    // The SFU holds a subscribe until the PeerConnection is connected, and the worker answers our
-    // requests one at a time. So wait: a request stuck there would hold up a new offer.
+    // The SFU holds a subscribe until the PeerConnection connects, which would hold up a new offer.
     if (this.busy || this.ownOffers > 0 || this.peer?.connectionState !== 'connected' || this.socket?.readyState !== WebSocket.OPEN) {
       return;
     }
 
-    // Tracks from a publication that ended: the device slept, restarted or left, or the viewer
-    // stopped publishing its microphone.
+    // Tracks from a publication that ended: the device slept, restarted or left, or the viewer's microphone stopped.
     const stale = [...this.subscriptions].filter(([, sub]) => {
       if (sub.viewerId) {
         const speaker = this.viewerInfos.find((info) => info.viewerId === sub.viewerId);
@@ -850,8 +816,7 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
       return;
     }
 
-    // Data channels come after the media, so they never hold up the first picture. A device that
-    // published again gets new channels; subscribing again keeps its control.
+    // Data channels come after the media, so they never hold up the first picture. Subscribing again keeps control.
     if (this.ipc) {
       const wantedData: string[] = [];
       for (const info of this.infos.values()) {
@@ -862,7 +827,7 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
         if (current?.generation === info.generation) {
           continue;
         }
-        // Close the old channels now, so their ids are free when the new ones arrive.
+        // Close the old channels now, so their ids are free for the new ones.
         if (current) {
           this.closeChannels(info.deviceId);
         }
@@ -968,7 +933,7 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
       return;
     }
     this.micOfferMuted = !this.isMicOn;
-    // Whether it starts muted goes first. The offer names only the microphone's m=audio.
+    // The mute state goes first. The offer names only the microphone's m=audio.
     sendRequest(this.socket, 'mute', { muted: this.micOfferMuted });
     sendRequest(this.socket, 'offer', { sdp: offer.sdp, tracks: [{ trackName: MICROPHONE_TRACK, mid: offer.mid }] });
   }
@@ -1115,7 +1080,7 @@ export class CloudflareRoom extends SfuRoom<RoomDevice, RoomViewerInfo> {
       if (state === 'connected') {
         this.sync();
       }
-      // ICE gave up. "disconnected" may still recover on its own; "failed" does not.
+      // "disconnected" may recover on its own; "failed" does not.
       if (state === 'failed') {
         this.rebuildPeer();
       }

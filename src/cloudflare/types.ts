@@ -1,30 +1,19 @@
 import type { SfuRoomOptions } from '../connection/types';
 
-/**
- * `viewerId`: connecting again with the same id within 30 s resumes the subscriptions, e.g. after
- * a page reload. `timeout` is `0` by default: the room keeps trying until `disconnect()`.
- */
+/** Reconnecting with the same `viewerId` within 30 s resumes the subscriptions. `timeout` is `0`: keep trying. */
 export interface CloudflareRoomOptions extends SfuRoomOptions {
-  /**
-   * The worker's API URL, e.g. `https://api.mazupo.com/sfu`. The access token comes from
-   * `POST {apiUrl}/token`.
-   */
+  /** The worker's API URL, ending in `/sfu`. The token comes from `POST {apiUrl}/token`. */
   apiUrl: string;
 
   /** The worker's viewer public key. */
   apiKey: string;
 
-  /**
-   * Open each live device's `_lossy` and `_reliable` channels: receive its IPC messages, and take
-   * control of it to send. Fixed for the connection.
-   */
+  /** Open each live device's `_lossy` and `_reliable`, to get its messages and take control. Fixed per connection. */
   ipc?: boolean;
 
   /**
-   * A random string of 16 or more characters that you keep with `viewerId`. Only a connection
-   * with it can resume this viewer or take its place. By default the room makes one, and keeps it
-   * in sessionStorage when you give `viewerId`, so a reload resumes. Give your own where there is
-   * no sessionStorage, as in React Native, to resume after the app comes back.
+   * 16 or more random characters kept with `viewerId`; only it can resume this viewer.
+   * By default the room keeps one in sessionStorage. Give your own in React Native.
    */
   secret?: string;
 }
@@ -78,15 +67,9 @@ export interface RoomDevice {
   generation: number;
   /** Track names. Set only while live. */
   tracks: string[];
-  /**
-   * The device's video and audio, once subscribed. A new MediaStream only when its tracks change,
-   * so it can go straight into `video.srcObject`.
-   */
+  /** The device's video and audio once subscribed. A new MediaStream only when its tracks change. */
   stream?: MediaStream;
-  /**
-   * Why the device is not playing, e.g. `wake_timeout` from the device, or `viewer_limit` when
-   * the worker refused this viewer for this publication.
-   */
+  /** Why the device is not playing, e.g. `wake_timeout`, or `viewer_limit` for this publication. */
   error?: string;
   /** The device is live with `_lossy` and `_reliable`. */
   ipc: boolean;

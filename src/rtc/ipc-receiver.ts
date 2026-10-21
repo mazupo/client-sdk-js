@@ -1,10 +1,7 @@
 import { Packet } from "../proto/packet";
 import { StreamAssembler } from "./datachannel-receiver";
 
-/**
- * Reads one `_lossy` or `_reliable` channel. A body that fits one message arrives flat, in
- * `raw` or `ipc`; a larger one arrives as a Stream of chunks on the same channel.
- */
+/** Reads one `_lossy` or `_reliable` channel: a small body arrives flat, a large one as a Stream of chunks. */
 export class IpcReceiver {
   private readonly assembler: StreamAssembler;
 

@@ -22,13 +22,7 @@ export interface UseGamepadOptions extends GamepadOptions {
 
 type AnyRoom = SfuRoom<SfuRoomDevice, SfuRoomViewer>;
 
-/**
- * Sends a gamepad to a connection: `MqttCamera`, `LiveKitRoom` or `CloudflareRoom`. Pass `null`
- * before there is one; the pad is still read, so `<GamepadView>` can show it.
- *
- * Puts only `connected` and `suspended` in state. Readings arrive 60/s; holding them here would
- * re-render the caller.
- */
+/** Sends a gamepad to a connection, or only reads it with `null`. State holds only `connected` and `suspended`. */
 export function useGamepad(connection: Connection | null = null, options: UseGamepadOptions = {}): UseGamepadResult {
   const { hz, endpoint, sampleWhileHidden, deviceIds } = options;
 

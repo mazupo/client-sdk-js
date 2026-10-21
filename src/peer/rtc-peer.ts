@@ -134,10 +134,7 @@ export interface RtcPeerConfig extends RTCConfiguration {
   options: PeerOptions;
 }
 
-/**
- * One RTCPeerConnection, for every backend: the received streams, the microphone and speaker,
- * the jitter buffer, and the IPC channels. Subclasses add what only their backend has.
- */
+/** One RTCPeerConnection for every backend: streams, microphone, speaker, jitter buffer and IPC. */
 export class RtcPeer {
   onDatachannel?: (role: ChannelRole) => void;
   /** An IPC message. `from` names the sender where the backend says who it was. */
@@ -293,10 +290,7 @@ export class RtcPeer {
     console.debug("webrtc peer is closed.");
   }
 
-  /**
-   * Whether this peer restarts ICE on its own when the connection drops. A peer whose backend
-   * starts over with a new session instead says no, and watches `onConnectionStateChange`.
-   */
+  /** Whether this peer restarts ICE on its own. One whose backend starts a new session instead says no. */
   protected restartsIce(): boolean {
     return true;
   }

@@ -18,10 +18,7 @@ export interface SfuRoomViewer {
   me: boolean;
 }
 
-/**
- * A room on an SFU, shared by devices and viewers: `LiveKitRoom` and `CloudflareRoom`. Besides
- * what every connection has, it lists who is in the room and can send to one device.
- */
+/** A room on an SFU: `LiveKitRoom` and `CloudflareRoom`. It lists who is in the room and can send to one device. */
 export abstract class SfuRoom<D extends SfuRoomDevice, V extends SfuRoomViewer> extends Connection {
   /** The devices in the room. Called with the whole list after every change. */
   onDevices?: (devices: D[]) => void;
@@ -51,10 +48,7 @@ export abstract class SfuRoom<D extends SfuRoomDevice, V extends SfuRoomViewer> 
     return this.sendDataTo(deviceId, new TextEncoder().encode(text), mode);
   }
 
-  /**
-   * Sends bytes to one device. False if it cannot reach it now. With `options`, to an IPC
-   * endpoint on it, as `sendToEndpoint()` does.
-   */
+  /** Sends bytes to one device, or to an IPC endpoint on it with `options`. False if it cannot reach it now. */
   sendDataTo(deviceId: string, data: Uint8Array, mode: IpcMode = 'reliable', options?: IpcOptions): boolean {
     return this.deliver(data, mode, options, [deviceId]);
   }
@@ -64,14 +58,11 @@ export abstract class SfuRoom<D extends SfuRoomDevice, V extends SfuRoomViewer> 
     return this.deliverable(mode, [deviceId]);
   }
 
-  /**
-   * Reads a gamepad and sends it where `sendText()` goes, or only to `deviceIds`. Calling it again
-   * returns the same sampler; pass `deviceIds` again to change where it sends.
-   */
+  /** Sends a gamepad where `sendText()` goes, or only to `deviceIds`. Calling again returns the same sampler. */
   override gamepad(options: RoomGamepadOptions = {}): GamepadSampler {
     const { deviceIds, ...rest } = options;
     const sampler = super.gamepad(rest);
-    // Before its first reading: the timer has not fired yet.
+    // Before its first reading.
     if ('deviceIds' in options) {
       sampler.sendTo(deviceIds ? [...deviceIds] : undefined);
     }

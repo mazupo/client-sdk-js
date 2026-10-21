@@ -28,10 +28,7 @@ interface PendingRequest {
   createdAt: number;
 }
 
-/**
- * The direct peer to one device over MQTT signaling. Besides media and IPC it has the `command`
- * and `stream` channels: snapshots, recording, recorded files and camera controls.
- */
+/** The direct peer to one device over MQTT. It adds the `command` and `stream` channels. */
 export class CommanderPeer extends RtcPeer {
   onSnapshot?: (base64: string) => void;
   onVideoListLoaded?: (res: QueryFileResponse) => void;

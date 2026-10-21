@@ -9,11 +9,7 @@ import { MqttClient } from '../signaling/mqtt-client';
 import { withMaxBitrate } from '../utils/rtc-tools';
 import { MqttCameraOptions } from './types';
 
-/**
- * One device, directly: SDP and ICE go through an MQTT broker, then video, audio and data go
- * peer to peer. Besides what every connection has, it takes snapshots, records, lists and
- * downloads recordings, and sets camera controls.
- */
+/** One device over MQTT, peer to peer. It also takes snapshots, records and sets camera controls. */
 export class MqttCamera extends Connection {
   /** A `snapshot()` arrived, as a data URL. */
   onSnapshot?: (base64: string) => void;
@@ -21,7 +17,7 @@ export class MqttCamera extends Connection {
   onVideoListLoaded?: (res: QueryFileResponse) => void;
   /** `downloadVideoFile()` finished. */
   onVideoDownloaded?: (file: Uint8Array) => void;
-  /** How much of a snapshot, file or large IPC message has arrived. */
+  /** How much of a snapshot, file or large IPC message arrived. */
   onProgress?: (received: number, total: number, type: RequestType, requestId?: string) => void;
   /** The device answered `startRecording()` or `stopRecording()`. */
   onRecording?: (res: RecordingResponse) => void;
