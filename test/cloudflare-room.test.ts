@@ -88,7 +88,7 @@ let tokenHang = false;
   return {
     ok,
     status: tokenStatus,
-    json: async () => (ok ? { token: `token-${tokenRequests.length}`, url: "wss://worker.test/cloudflare/rtc" } : { error: { code: "unauthorized", message: "Wrong key." } }),
+    json: async () => (ok ? { token: `token-${tokenRequests.length}`, url: "wss://worker.test/sfu/rtc" } : { error: { code: "unauthorized", message: "Wrong key." } }),
   };
 };
 
@@ -365,7 +365,7 @@ async function joinedRoom(
   options: { ipc?: boolean; connect?: boolean; microphone?: boolean; viewers?: ({ viewerId: string } & Record<string, unknown>)[] } = {},
 ): Promise<Setup> {
   const room = new CloudflareRoom({
-    apiUrl: "https://worker.test/cloudflare/",
+    apiUrl: "https://worker.test/sfu/",
     apiKey: "viewer-key",
     roomId: "lab-a",
     viewerId: "alice",
@@ -441,11 +441,11 @@ async function main() {
     reset();
     const { room } = await joinedRoom([], { ipc: false });
     const request = tokenRequests[0];
-    check(request.url === "https://worker.test/cloudflare/token", `url ${request.url}`);
+    check(request.url === "https://worker.test/sfu/token", `url ${request.url}`);
     check(request.headers.Authorization === "Bearer viewer-key", "bearer viewer key");
     check(request.body.viewer_id === "alice" && request.body.room_id === "lab-a" && request.body.can_subscribe === true, "viewer_id, room_id, can_subscribe");
     check(!("data_channels" in request.body), "no data_channels without ipc");
-    check(FakeWebSocket.all[0].url === `wss://worker.test/cloudflare/rtc?access_token=token-1`, "the socket uses the token");
+    check(FakeWebSocket.all[0].url === `wss://worker.test/sfu/rtc?access_token=token-1`, "the socket uses the token");
     room.disconnect();
     reset();
     const ipcRoom = await joinedRoom([], { ipc: true });
@@ -788,7 +788,7 @@ async function main() {
   {
     reset();
     tokenStatus = 401;
-    const room = new CloudflareRoom({ apiUrl: "https://worker.test/cloudflare", apiKey: "wrong", roomId: "lab-a", microphone: false });
+    const room = new CloudflareRoom({ apiUrl: "https://worker.test/sfu", apiKey: "wrong", roomId: "lab-a", microphone: false });
     const errors: ConnectionError[] = [];
     const statuses: ConnectionStatus[] = [];
     room.onError = (error) => errors.push(error);
@@ -803,7 +803,7 @@ async function main() {
 
     reset();
     tokenHang = true;
-    const waiting = new CloudflareRoom({ apiUrl: "https://worker.test/cloudflare", apiKey: "viewer-key", roomId: "lab-a", microphone: false });
+    const waiting = new CloudflareRoom({ apiUrl: "https://worker.test/sfu", apiKey: "viewer-key", roomId: "lab-a", microphone: false });
     const waitErrors: ConnectionError[] = [];
     waiting.onError = (error) => waitErrors.push(error);
     waiting.connect();
@@ -1006,7 +1006,7 @@ async function main() {
     micRequests = 0;
     micTracks.length = 0;
     micHold = true;
-    const room = new CloudflareRoom({ apiUrl: "https://worker.test/cloudflare", apiKey: "viewer-key", roomId: "lab-a", microphone: true });
+    const room = new CloudflareRoom({ apiUrl: "https://worker.test/sfu", apiKey: "viewer-key", roomId: "lab-a", microphone: true });
     room.connect();
     await flush();
     room.disconnect();
@@ -1071,7 +1071,7 @@ async function main() {
     reset();
     const storage = new Map<string, string>();
     (globalThis as any).sessionStorage = { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value) };
-    const options = { apiUrl: "https://worker.test/cloudflare", apiKey: "viewer-key", roomId: "lab-a", microphone: false };
+    const options = { apiUrl: "https://worker.test/sfu", apiKey: "viewer-key", roomId: "lab-a", microphone: false };
     const random = new CloudflareRoom(options);
     random.connect();
     await flush();

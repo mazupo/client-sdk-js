@@ -6,7 +6,7 @@ import type { SfuRoomOptions } from '../connection/types';
  */
 export interface CloudflareRoomOptions extends SfuRoomOptions {
   /**
-   * The worker's API URL, e.g. `https://api.mazupo.com/cloudflare`. The access token comes from
+   * The worker's API URL, e.g. `https://api.mazupo.com/sfu`. The access token comes from
    * `POST {apiUrl}/token`.
    */
   apiUrl: string;

@@ -18,7 +18,7 @@ Next to the [options of every connection](connection.md#options) and of [every r
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
-| apiUrl | `string` | | **Required.** The worker's API URL, such as `https://api.mazupo.com/cloudflare`. The room gets its access token from `POST <apiUrl>/token`. |
+| apiUrl | `string` | | **Required.** The worker's API URL, such as `https://api.mazupo.com/sfu`. The room gets its access token from `POST <apiUrl>/token`. |
 | apiKey | `string` | | **Required.** The worker's viewer public key. |
 | roomId | `string` | | **Required.** The room to watch. Devices join rooms with `--cloudflare-room`. |
 | viewerId | `string` | random UUID | Your name in the room, such as `Richard Tai`: 1 to 64 letters (any language), digits, spaces, `.`, `_` or `-`. Reconnect with it within 30 seconds to keep your streams and control. |

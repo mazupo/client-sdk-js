@@ -46,7 +46,7 @@ In a room, the gamepad goes where `sendText()` goes. In a `CloudflareRoom`, that
 import { CloudflareRoom } from '@mazupo/client';
 
 const room = new CloudflareRoom({
-  apiUrl: 'https://api.mazupo.com/cloudflare',
+  apiUrl: 'https://api.mazupo.com/sfu',
   apiKey: 'VIEWER_PUBLIC_KEY',
   roomId: 'your-room',
   ipc: true,

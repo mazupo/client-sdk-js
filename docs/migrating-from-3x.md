@@ -131,7 +131,7 @@ camera.connect();
 import { CloudflareRoom } from '@mazupo/client';
 
 const room = new CloudflareRoom({
-  apiUrl: 'https://api.mazupo.com/cloudflare',
+  apiUrl: 'https://api.mazupo.com/sfu',
   apiKey: 'VIEWER_PUBLIC_KEY',
   roomId: 'your-room',
 });
