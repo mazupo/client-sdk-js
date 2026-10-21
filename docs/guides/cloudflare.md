@@ -6,11 +6,9 @@ A device streams only while someone watches its room.
 
 ## Free test server
 
-<!-- TODO: fill in the viewer public key when the worker is deployed. -->
-
 | API URL | Viewer public key |
 | --- | --- |
-| `https://api.mazupo.com/sfu` | `VIEWER_PUBLIC_KEY` |
+| `https://api.mazupo.com/sfu` | `-706d13ForZLHmv6FwARf9ZgEEfO78AattyxWhNoHFo` |
 
 Start a device on the same server first. See [SFU: Cloudflare Realtime](https://mazupo.com/docs/pi-webrtc/signaling/sfu#cloudflare-realtime). The server is shared, so use a room name nobody else uses.
 
@@ -21,7 +19,7 @@ import { CloudflareRoom } from '@mazupo/client';
 
 const room = new CloudflareRoom({
   apiUrl: 'https://api.mazupo.com/sfu',
-  apiKey: 'VIEWER_PUBLIC_KEY',
+  apiKey: '-706d13ForZLHmv6FwARf9ZgEEfO78AattyxWhNoHFo',
   roomId: 'your-room',
 });
 
@@ -74,7 +72,7 @@ Only the viewer that controls a device can send to it. Others wait in line.
 ```javascript
 const room = new CloudflareRoom({
   apiUrl: 'https://api.mazupo.com/sfu',
-  apiKey: 'VIEWER_PUBLIC_KEY',
+  apiKey: '-706d13ForZLHmv6FwARf9ZgEEfO78AattyxWhNoHFo',
   roomId: 'your-room',
   ipc: true,
 });
@@ -157,7 +155,7 @@ if (!viewerId) {
 
 const room = new CloudflareRoom({
   apiUrl: 'https://api.mazupo.com/sfu',
-  apiKey: 'VIEWER_PUBLIC_KEY',
+  apiKey: '-706d13ForZLHmv6FwARf9ZgEEfO78AattyxWhNoHFo',
   roomId: 'your-room',
   viewerId,
 });

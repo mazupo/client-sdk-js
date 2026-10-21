@@ -132,7 +132,7 @@ import { CloudflareRoom } from '@mazupo/client';
 
 const room = new CloudflareRoom({
   apiUrl: 'https://api.mazupo.com/sfu',
-  apiKey: 'VIEWER_PUBLIC_KEY',
+  apiKey: '-706d13ForZLHmv6FwARf9ZgEEfO78AattyxWhNoHFo',
   roomId: 'your-room',
 });
 room.onDevices = (devices) => {
