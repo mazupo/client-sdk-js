@@ -1,6 +1,6 @@
 # Cloudflare Realtime
 
-Use `CloudflareRoom` to watch every device in a room through Cloudflare Realtime SFU. A [cf-sfu-worker](https://github.com/mazupo/cf-sfu-worker) gives out access tokens and wakes the devices. The browser only needs the viewer public key.
+Use `CloudflareRoom` to watch every device in a room through Cloudflare Realtime SFU. A worker that the maintainer hosts on Cloudflare gives out access tokens and wakes the devices. The browser only needs the viewer public key. Rooms of your own come with a [sponsor tier](https://mazupo.com/docs/pi-webrtc/sponsors#tiers). Try the free test server below first.
 
 A device streams only while someone watches its room.
 
