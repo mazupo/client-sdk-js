@@ -4,7 +4,7 @@
 
 - [MqttCamera](mqtt-camera.md): one device, peer to peer, through an MQTT broker.
 - [LiveKitRoom](livekit-room.md): a room on a LiveKit SFU.
-- [CloudflareRoom](cloudflare-room.md): a room on Cloudflare's SFU, through a cf-sfu-worker.
+- [CloudflareRoom](cloudflare-room.md): a room on Cloudflare's SFU, through the hosted worker.
 
 The two rooms also share the [room](#rooms) part below.
 

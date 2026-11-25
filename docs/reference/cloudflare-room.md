@@ -1,6 +1,6 @@
 # CloudflareRoom
 
-`CloudflareRoom` watches every device in one room of a [cf-sfu-worker](https://github.com/mazupo/cf-sfu-worker). See the [Cloudflare Realtime guide](../guides/cloudflare.md) for examples.
+`CloudflareRoom` watches every device in one room of the hosted Cloudflare worker. See the [Cloudflare Realtime guide](../guides/cloudflare.md) for examples.
 
 It is a [connection](connection.md) and a [room](connection.md#rooms).
 

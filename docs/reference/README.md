@@ -6,7 +6,7 @@ Everything that `@mazupo/client` exports. Pick the class for the way your device
 | --- | --- | --- |
 | [MqttCamera](mqtt-camera.md) | An MQTT broker, then peer to peer | One device: video, audio both ways, IPC, snapshots, recording, files, camera controls. |
 | [LiveKitRoom](livekit-room.md) | A LiveKit SFU | A room of devices that many people watch. IPC to the room or to one device. |
-| [CloudflareRoom](cloudflare-room.md) | Cloudflare's SFU, through a cf-sfu-worker | A room of devices that stream only while someone watches. One viewer at a time controls each device. |
+| [CloudflareRoom](cloudflare-room.md) | Cloudflare's SFU, through the hosted worker | A room of devices that stream only while someone watches. One viewer at a time controls each device. |
 
 ```javascript
 import { MqttCamera } from '@mazupo/client';

@@ -6,7 +6,7 @@
 | --- | --- |
 | `new PiCamera({ signaling: 'mqtt', ... })` | `new MqttCamera({ ... })` |
 | `new PiCamera({ signaling: 'livekit', ... })` | `new LiveKitRoom({ ... })` |
-| `new PiCamera({ signaling: 'cloudflare', ... })` | `new CloudflareRoom({ ... })`, with a [cf-sfu-worker](https://github.com/mazupo/cf-sfu-worker) |
+| `new PiCamera({ signaling: 'cloudflare', ... })` | `new CloudflareRoom({ ... })`, with the [hosted worker](guides/cloudflare.md) |
 
 ## MQTT
 
@@ -102,13 +102,13 @@ The React hook takes the connection first: `useGamepad({ camera })` becomes `use
 
 ## Cloudflare
 
-In 4.0, `CloudflareRoom` watches a whole room of devices through a [cf-sfu-worker](https://github.com/mazupo/cf-sfu-worker).
+In 4.0, `CloudflareRoom` watches a whole room of devices through the [hosted worker](guides/cloudflare.md).
 
 These are gone: the `apiUrl` and `apiKey` options of `PiCamera`, `refresh()`, `onDeviceSession`, and the `DeviceSession` and `ApiConnectionOptions` types.
 
 ### The device has to move too
 
-The device needs a pi-webrtc version that uses a cf-sfu-worker, with `--cloudflare-room`. See [SFU: Cloudflare Realtime](https://mazupo.com/docs/pi-webrtc/signaling/sfu#cloudflare-realtime).
+The device needs a pi-webrtc version that uses the worker, with `--cloudflare-room`. See [SFU: Cloudflare Realtime](https://mazupo.com/docs/pi-webrtc/signaling/sfu#cloudflare-realtime).
 
 The worker has its own keys. The viewer key of the old device API does not work with it.
 

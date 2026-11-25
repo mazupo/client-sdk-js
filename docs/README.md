@@ -18,6 +18,6 @@ Use the class that matches how the device connects. All three are [connections](
 | --- | --- | --- |
 | [`MqttCamera`](reference/mqtt-camera.md) | An MQTT broker, then peer to peer | One device. Video, audio both ways, IPC, snapshots, recording, files and camera controls. |
 | [`LiveKitRoom`](reference/livekit-room.md) | A LiveKit SFU | A room of devices for many viewers. IPC to the room or to one device. |
-| [`CloudflareRoom`](reference/cloudflare-room.md) | Cloudflare's SFU, through a cf-sfu-worker | A room of devices that stream only while someone watches. One viewer at a time controls each device. See [Cloudflare Realtime](guides/cloudflare.md). |
+| [`CloudflareRoom`](reference/cloudflare-room.md) | Cloudflare's SFU, through the hosted worker | A room of devices that stream only while someone watches. One viewer at a time controls each device. See [Cloudflare Realtime](guides/cloudflare.md). |
 
 The device must run pi-webrtc 3.x or later. A 2.x device does not understand a 3.x or 4.x client. See [Migrating from 2.x](migrating-from-2x.md).
